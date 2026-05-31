@@ -12,6 +12,7 @@ TTL      : ``cache_ttl_s`` (default 60s)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -48,6 +49,10 @@ class ConfigStore:
         self._db = db
         self._state = redis_state
         self._ttl = cache_ttl_s
+        # Single-flight lock: when many coroutines find a cold cache at the
+        # same time, only one runs the DB fetch + cache write. The rest wait,
+        # observe the freshly-warmed cache on retry, and skip the DB hit.
+        self._refill_lock = asyncio.Lock()
 
     # ---------------------------------------------------------------- public API
 
@@ -111,7 +116,12 @@ class ConfigStore:
         )
 
     async def load_or_refresh(self, *, force: bool = False) -> Config:
-        """Return config from Redis cache, or re-fetch from DB on miss/force."""
+        """Return config from Redis cache, or re-fetch from DB on miss/force.
+
+        Cold-cache stampede protection: only one coroutine at a time runs
+        the DB fetch + cache write; concurrent callers wait on
+        ``self._refill_lock`` and observe the warmed cache on re-check.
+        """
         if not force:
             cached = await self._state.client.get(_REDIS_KEY)
             if cached is not None:
@@ -123,9 +133,21 @@ class ConfigStore:
                         "cached config in Redis is corrupt; re-fetching from DB"
                     )
 
-        cfg = await self.load_from_db()
-        await self._write_to_redis(cfg)
-        return cfg
+        async with self._refill_lock:
+            # Re-check inside the lock so the leader's writers see the
+            # fresh value rather than racing the DB themselves.
+            if not force:
+                cached = await self._state.client.get(_REDIS_KEY)
+                if cached is not None:
+                    try:
+                        return Config.model_validate(json.loads(cached.decode("utf-8")))
+                    except Exception:
+                        log.warning(
+                            "cached config in Redis is corrupt; re-fetching from DB"
+                        )
+            cfg = await self.load_from_db()
+            await self._write_to_redis(cfg)
+            return cfg
 
     async def write(self, cfg: Config) -> None:
         """Persist Config to all three DB tables atomically, then bust the cache."""
