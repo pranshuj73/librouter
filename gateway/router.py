@@ -17,6 +17,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from uuid import uuid4
 
 from gateway.errors import (
     AuthError,
@@ -143,7 +144,9 @@ class Router:
         )
         prompt_chars = sum(len(m.content) for m in req.messages)
         est = estimate_tokens(prompt_chars, req.max_tokens)
-        request_id = (req.metadata or {}).get("request_id", "")
+        request_id = uuid4().hex
+        _raw_trace = (req.metadata or {}).get("request_id")
+        client_trace_id: str | None = str(_raw_trace)[:128] if _raw_trace is not None else None
 
         while True:
             remaining = deadline - self._now()
@@ -199,6 +202,7 @@ class Router:
                         attempt_idx=len(attempts),
                         latency_s=elapsed,
                         status=status,
+                        client_trace_id=client_trace_id,
                     )
                 )
                 await self._obs.record_failure(cand, kind=type(e).__name__)
@@ -230,10 +234,11 @@ class Router:
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
                 vendor_req_id=result.vendor_request_id,
+                client_trace_id=client_trace_id,
             )
             attempts.append(rec)
             response = ChatCompletionResponse(
-                id=request_id or rec.vendor_req_id or "req",
+                id=request_id,
                 model=tier,
                 choices=[
                     Choice(
@@ -275,6 +280,7 @@ class Router:
         input_tokens: int = 0,
         output_tokens: int = 0,
         vendor_req_id: str | None = None,
+        client_trace_id: str | None = None,
     ) -> AttemptRecord:
         price = self._cfg.prices.get(cand.key())
         if price is None:
@@ -284,7 +290,7 @@ class Router:
                 input_tokens * price.input + output_tokens * price.output
             ) / 1_000_000
         return AttemptRecord(
-            request_id=request_id or "req",
+            request_id=request_id,
             caller=caller,
             tier=tier,
             provider=cand.provider,
@@ -296,4 +302,5 @@ class Router:
             latency_ms=max(0, int(latency_s * 1000)),
             status=status,
             vendor_req_id=vendor_req_id,
+            client_trace_id=client_trace_id,
         )

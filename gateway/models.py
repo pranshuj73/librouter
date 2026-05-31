@@ -255,6 +255,7 @@ class AttemptRecord(BaseModel):
     latency_ms: NonNegativeInt
     status: str
     vendor_req_id: str | None = None
+    client_trace_id: str | None = Field(default=None, max_length=128)
 
 
 class Caller(BaseModel):

@@ -97,6 +97,7 @@ class Database:
                 r.latency_ms,
                 r.status,
                 r.vendor_req_id,
+                r.client_trace_id,
             )
             for r in records
         ]
@@ -106,9 +107,9 @@ class Database:
                 INSERT INTO requests
                     (request_id, caller, tier, provider, model,
                      attempt_idx, input_tokens, output_tokens, cost_usd,
-                     latency_ms, status, vendor_req_id)
+                     latency_ms, status, vendor_req_id, client_trace_id)
                 VALUES
-                    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 """,
                 rows,
             )
