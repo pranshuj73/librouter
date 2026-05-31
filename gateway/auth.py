@@ -1,13 +1,16 @@
 """Bearer-key auth -> Caller lookup with 60s in-process cache.
 
 Caller API keys are never stored in plaintext; the gateway only knows their
-SHA-256 hashes (with a `sha256:` prefix). The `key_hash` in `config.yaml` and
-the `callers.key_hash` column use the same scheme.
+HMAC-SHA256 hashes (with a `v2:hmac-sha256:` prefix). The pepper is a
+server-side secret stored in SecretsManager under GATEWAY_KEY_HASH_PEPPER.
+Same plaintext key + different pepper -> different hash, so an exfiltrated
+callers table is useless without the pepper.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -16,8 +19,11 @@ from typing import Protocol
 from gateway.models import Caller
 
 
-def hash_api_key(raw: str) -> str:
-    return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
+def hash_api_key(raw: str, *, pepper: str) -> str:
+    if not pepper:
+        raise ValueError("GATEWAY_KEY_HASH_PEPPER must be a non-empty string")
+    digest = hmac.new(pepper.encode(), raw.encode(), hashlib.sha256).hexdigest()
+    return "v2:hmac-sha256:" + digest
 
 
 class _DBProtocol(Protocol):
@@ -34,17 +40,24 @@ class CallerResolver:
     The cache is bounded to `cache_maxsize` entries using an LRU eviction
     policy (oldest-inserted entry is evicted when the limit is exceeded).
     This prevents memory exhaustion from clients spamming unique bearer tokens.
+
+    The `pepper` is a required server-side secret used to HMAC caller API keys
+    before lookup. A falsy pepper is rejected at construction — fail loud.
     """
 
     def __init__(
         self,
         *,
         db: _DBProtocol,
+        pepper: str,
         cache_ttl_s: float = 60.0,
         cache_maxsize: int = 10_000,
         now_s_fn: Callable[[], float] = time.monotonic,
     ) -> None:
+        if not pepper:
+            raise ValueError("GATEWAY_KEY_HASH_PEPPER must be a non-empty string")
         self._db = db
+        self._pepper = pepper
         self._ttl = cache_ttl_s
         self._maxsize = cache_maxsize
         self._now = now_s_fn
@@ -56,7 +69,7 @@ class CallerResolver:
         token = header[len("Bearer "):].strip()
         if not token:
             return None
-        key_hash = hash_api_key(token)
+        key_hash = hash_api_key(token, pepper=self._pepper)
 
         now = self._now()
         cached = self._cache.get(key_hash)

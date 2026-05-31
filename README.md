@@ -24,6 +24,21 @@ not in the application:
 
     ./scripts/setup.sh
 
+### Caller key pepper
+
+Caller API keys are stored as `HMAC-SHA256(pepper, raw_key)` — never as bare
+SHA-256 hashes. The pepper is a server-side secret that must be set in
+`GATEWAY_KEY_HASH_PEPPER` before running `scripts/seed_callers.py` or starting
+the gateway. Generate one with:
+
+    openssl rand -hex 32
+
+Without the pepper, `scripts/seed_callers.py` exits immediately with a non-zero
+code and the gateway refuses to start. If you rotate the pepper, every
+`caller_key_hash` row in the database becomes invalid — you must re-run
+`scripts/seed_callers.py` with the new pepper to rebuild all hashes. There is
+no automatic migration path: pepper rotation is an explicit operator action.
+
 This runs:
 1. `scripts/apply_migrations.py` — applies every file in `migrations/*.sql`
 2. `scripts/seed_callers.py` — upserts callers from `scripts/data/caller-seeding.json`

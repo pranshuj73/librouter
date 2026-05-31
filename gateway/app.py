@@ -146,10 +146,13 @@ async def lifespan(app: FastAPI):
             "ANTHROPIC_API_KEY",
             "GOOGLE_API_KEY",
             _METRICS_TOKEN_KEY,
+            "GATEWAY_KEY_HASH_PEPPER",
         ):
             _val = os.environ.get(_key, "")
             if _val:
                 secrets.set(_key, _val)
+
+    pepper = secrets.get("GATEWAY_KEY_HASH_PEPPER")  # KeyError if missing -> startup crash, fail-loud
 
     vendors = build_vendors(cfg, secrets)
 
@@ -186,7 +189,7 @@ async def lifespan(app: FastAPI):
         observer=observer,
         rng=rng,
     )
-    auth = CallerResolver(db=db)
+    auth = CallerResolver(db=db, pepper=pepper)
 
     app.state.cfg = holder
     app.state.router = router

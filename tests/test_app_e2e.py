@@ -41,6 +41,7 @@ from gateway.errors import Transient5xx  # noqa: E402
 CALLER_KEY = "e2e-test-key"
 TIGHT_KEY = "tight-key"
 METRICS_TOKEN = "e2e-metrics-token"
+_TEST_PEPPER = "test-pepper-32-bytes-of-not-real-entropy"
 
 
 def _reset_prometheus_registry() -> None:
@@ -149,7 +150,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
             "callers": [
                 {
                     "name": "e2e",
-                    "key_hash": hash_api_key(CALLER_KEY),
+                    "key_hash": hash_api_key(CALLER_KEY, pepper=_TEST_PEPPER),
                     "daily_token_cap": 10000000,
                 },
                 {
@@ -157,7 +158,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
                     # The check is `used >= cap` BEFORE the call, so the first
                     # request still succeeds (used==0); the second is blocked.
                     "name": "e2e-tight",
-                    "key_hash": hash_api_key(TIGHT_KEY),
+                    "key_hash": hash_api_key(TIGHT_KEY, pepper=_TEST_PEPPER),
                     "daily_token_cap": 1,
                 },
             ],
@@ -174,6 +175,9 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
             # cr-1 §3.3: seed the metrics token into the MockSecretsManager via
             # env so the /metrics endpoint grants access in e2e tests.
             m.setenv("GATEWAY_METRICS_TOKEN", METRICS_TOKEN)
+            # cr-1 §3.1: seed the key hash pepper so CallerResolver can be
+            # constructed in the lifespan.
+            m.setenv("GATEWAY_KEY_HASH_PEPPER", _TEST_PEPPER)
             # cr-1 §2.2 recommends gating boot-time caller upsert; until that
             # lands, seeding happens unconditionally (no GATEWAY_SEED_CALLERS).
 
