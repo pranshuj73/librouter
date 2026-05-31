@@ -48,7 +48,10 @@ async def breakers(redis):
 async def test_starts_closed(breakers):
     b, _ = breakers
     assert await b.state("openai", "gpt-4o") is BreakerState.CLOSED
-    assert (await b.snapshot()).get(("openai", "gpt-4o")) is None or True
+    # Per t-1 §4.1: the breaker has no snapshot entry until samples are
+    # recorded. Verify that explicitly (no `or True` tautology).
+    snap = await b.snapshot()
+    assert ("openai", "gpt-4o") not in snap
 
 
 async def test_stays_closed_under_threshold(breakers):
@@ -118,6 +121,11 @@ async def test_probe_reopens_on_failure(breakers):
     assert await b.state("openai", "gpt-4o") is BreakerState.OPEN
 
 
+# Caveat per t-1 §4.5:
+# fakeredis serializes commands on the event loop, so this verifies SET NX
+# semantics under sequential atomic operations, NOT true concurrent contention.
+# Real-Redis concurrency is covered separately in tests/test_app_e2e.py
+# (TODO if not yet added).
 async def test_only_one_concurrent_probe_holder(breakers):
     b, clock = breakers
     for _ in range(20):
@@ -128,3 +136,90 @@ async def test_only_one_concurrent_probe_holder(breakers):
         *[b.try_probe("openai", "gpt-4o") for _ in range(6)]
     )
     assert sum(1 for r in results if r) == 1
+
+
+# ---------------------------------------------------------------- missing scenarios (t-1 §4)
+
+
+async def test_breakers_are_independent_per_candidate(breakers):
+    """Tripping one (provider, model) must not affect another. Per t-1 §4."""
+    b, _ = breakers
+    for _ in range(20):
+        await b.record_failure("openai", "gpt-4o")
+    await b.refresh_snapshot()
+    assert await b.state("openai", "gpt-4o") is BreakerState.OPEN
+    # anthropic/haiku has never been touched — still CLOSED.
+    assert await b.state("anthropic", "haiku") is BreakerState.CLOSED
+
+
+async def test_state_for_unseen_candidate_returns_closed(breakers):
+    """A fresh BreakerSet with no samples returns CLOSED for any candidate."""
+    b, _ = breakers
+    assert await b.state("never", "seen") is BreakerState.CLOSED
+
+
+async def test_open_to_half_open_to_open_cycle(breakers):
+    """OPEN -> HALF_OPEN -> OPEN; second open updates opened_at_s. Per t-1 §4."""
+    b, clock = breakers
+    # First trip.
+    for _ in range(20):
+        await b.record_failure("openai", "gpt-4o")
+    await b.refresh_snapshot()
+    assert await b.state("openai", "gpt-4o") is BreakerState.OPEN
+    first_open_at = (await b.snapshot())[("openai", "gpt-4o")].opened_at_s
+
+    # Advance clock past open_duration_s -> HALF_OPEN.
+    clock[0] = 31.0
+    await b.refresh_snapshot()
+    assert await b.state("openai", "gpt-4o") is BreakerState.HALF_OPEN
+
+    # Acquire probe and record failure -> OPEN again.
+    assert await b.try_probe("openai", "gpt-4o") is True
+    clock[0] = 32.0
+    await b.record_failure("openai", "gpt-4o")
+    await b.refresh_snapshot()
+    assert await b.state("openai", "gpt-4o") is BreakerState.OPEN
+
+    second_open_at = (await b.snapshot())[("openai", "gpt-4o")].opened_at_s
+    assert second_open_at > first_open_at
+
+
+async def test_probe_lock_ttl_blocks_concurrent_then_releases(breakers):
+    """Second try_probe under TTL returns False; after explicit delete a
+    third try_probe succeeds.
+
+    Note: fakeredis doesn't reliably honor TTL expiry without time-travel,
+    so we simulate expiry by deleting the key.
+    """
+    b, clock = breakers
+    # Trip and transition to HALF_OPEN to make probing legitimate.
+    for _ in range(20):
+        await b.record_failure("openai", "gpt-4o")
+    await b.refresh_snapshot()
+    clock[0] = 31.0
+    await b.refresh_snapshot()
+
+    # First probe wins.
+    assert await b.try_probe("openai", "gpt-4o") is True
+    # Second under TTL is blocked.
+    assert await b.try_probe("openai", "gpt-4o") is False
+
+    # Simulate expiry via explicit delete (fakeredis TTL isn't reliable).
+    probe_key = b._state.breaker_probe_key("openai", "gpt-4o")
+    await b._state.client.delete(probe_key)
+
+    # Third probe now succeeds.
+    assert await b.try_probe("openai", "gpt-4o") is True
+
+
+async def test_threshold_boundary_at_exactly_minimum_samples(breakers):
+    """At exactly min_samples with failures/total == failure_threshold,
+    code uses `>=` so the breaker should trip. Per gateway/breaker.py:244."""
+    b, _ = breakers
+    # 14 successes + 6 failures = 20 samples, 6/20 = 0.30 == threshold.
+    for _ in range(14):
+        await b.record_success("openai", "gpt-4o")
+    for _ in range(6):
+        await b.record_failure("openai", "gpt-4o")
+    await b.refresh_snapshot()
+    assert await b.state("openai", "gpt-4o") is BreakerState.OPEN

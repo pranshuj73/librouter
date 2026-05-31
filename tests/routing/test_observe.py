@@ -87,3 +87,68 @@ async def test_aggregate_returns_zero_when_no_window(observer):
     assert agg.total == 0
     assert agg.error_rate == 0.0
     assert agg.mean_latency_s == 0.0
+
+
+# ---------------------------------------------------------------- §12 additions
+
+
+async def test_record_failure_sets_ttl(observer):
+    """Symmetric to `test_records_have_ttl` but for the failure path.
+
+    `record_failure` also calls `expire(key, window_s * 4)`; without this
+    test the failure-side TTL is untested (t-1 §12 Missing scenarios).
+    """
+    obs, _, state = observer
+    cand = CandidateRef(provider="openai", model="gpt-4o")
+    await obs.record_failure(cand, kind="RateLimited")
+    key = state.observe_key("openai", "gpt-4o", 10)
+    ttl = await state.client.ttl(key)
+    assert ttl > 60
+
+
+async def test_aggregate_excludes_samples_outside_window(observer):
+    """Samples older than `now - window_s` must not be summed.
+
+    Record success at t=10; query at t=100 with window_s=60 (floor=40).
+    The t=10 hash key is outside the [40, 100] inclusive range.
+    """
+    obs, clock, _ = observer
+    cand = CandidateRef(provider="openai", model="gpt-4o")
+    clock[0] = 10.0
+    await obs.record_success(cand, latency_s=0.5)
+    clock[0] = 100.0
+    agg = await obs.aggregate(cand)
+    assert agg.total == 0
+    assert agg.successes == 0
+    assert agg.failures == 0
+
+
+async def test_aggregate_failure_only_window_has_zero_mean_latency(observer):
+    """Covers the `latency_count == 0` branch in observe.py:89.
+
+    Only failures recorded => no latency samples => mean_latency_s == 0.0.
+    """
+    obs, _, _ = observer
+    cand = CandidateRef(provider="openai", model="gpt-4o")
+    await obs.record_failure(cand, kind="Transient5xx")
+    await obs.record_failure(cand, kind="Timeout")
+    agg = await obs.aggregate(cand)
+    assert agg.failures == 2
+    assert agg.successes == 0
+    assert agg.mean_latency_s == 0.0
+    assert agg.error_rate == 1.0
+
+
+async def test_multiple_failure_kinds_persist_independently(observer):
+    """`fail_<Kind>` counters live alongside `failures` in the same hash."""
+    obs, _, state = observer
+    cand = CandidateRef(provider="openai", model="gpt-4o")
+    await obs.record_failure(cand, kind="RateLimited")
+    await obs.record_failure(cand, kind="Timeout")
+    await obs.record_failure(cand, kind="Timeout")
+    key = state.observe_key("openai", "gpt-4o", 10)
+    h = await state.client.hgetall(key)
+    h = {k.decode(): v.decode() for k, v in h.items()}
+    assert int(h["fail_RateLimited"]) == 1
+    assert int(h["fail_Timeout"]) == 2
+    assert int(h["failures"]) == 3

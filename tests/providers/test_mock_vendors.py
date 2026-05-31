@@ -115,3 +115,64 @@ async def test_explicit_vendor_request_id_preserved():
     v.queue_success(vendor_request_id="custom-id-1")
     r = await v.chat("gpt-4o", _msg(), _params(), timeout_s=5.0)
     assert r.vendor_request_id == "custom-id-1"
+
+
+# --------------------------------------------------------------------- t-1 §15
+# Additions per docs/code-review/t-1.md §15: per-subclass name/VRID prefix
+# coverage, clear() semantics, None temperature/top_p, default token math.
+
+
+async def test_each_mock_has_correct_name_and_vrid_prefix():
+    """Per t-1 §15 — `name` and `_vrid_prefix` per concrete subclass."""
+    s = MockSecretsManager()
+
+    cases = [
+        (MockOpenAIVendor(s), "openai", "vrid-openai-mock-"),
+        (MockAnthropicVendor(s), "anthropic", "vrid-anthropic-mock-"),
+        (MockGoogleVendor(s), "google", "vrid-google-mock-"),
+    ]
+    for vendor, expected_name, expected_prefix in cases:
+        assert vendor.name == expected_name
+        r = await vendor.chat("some-model", _msg(), _params(), timeout_s=5.0)
+        assert r.vendor_request_id is not None
+        assert r.vendor_request_id.startswith(expected_prefix), (
+            f"{expected_name} produced VRID {r.vendor_request_id!r}, "
+            f"expected prefix {expected_prefix!r}"
+        )
+
+
+async def test_clear_resets_script_and_call_count():
+    """Per t-1 §15 — `clear()` empties both `_script` and `_call_count`."""
+    v = MockOpenAIVendor(MockSecretsManager())
+    v.queue_success(text="first")
+    v.queue_success(text="second")
+    await v.chat("gpt-4o", _msg(), _params(), timeout_s=5.0)
+    assert v.call_count == 1
+
+    v.clear()
+    assert v.call_count == 0
+
+    # Next call falls through to default (no scripted response remaining).
+    r = await v.chat("gpt-4o", _msg(), _params(), timeout_s=5.0)
+    assert r.text == "ok"  # default _default_text, not "second"
+    assert v.call_count == 1
+
+
+async def test_temperature_and_top_p_none_accepted():
+    """Per t-1 §15 — `ChatParams(temperature=None, top_p=None)` does not error."""
+    v = MockGoogleVendor(MockSecretsManager())
+    params = ChatParams(max_tokens=64, temperature=None, top_p=None)
+    r = await v.chat("gemini", _msg(), params, timeout_s=5.0)
+    assert r.text == "ok"
+
+
+async def test_default_input_tokens_reflect_message_size():
+    """Per t-1 §15 — default success input_tokens is `sum(len(m.content)) // 4 + 1`.
+
+    See `gateway/providers/mock/_base_mock.py:133`. With a single user message
+    "hello" (5 chars), expected = 5 // 4 + 1 == 2.
+    """
+    v = MockOpenAIVendor(MockSecretsManager())
+    msgs = [Message(role="user", content="hello")]
+    r = await v.chat("gpt-4o", msgs, _params(), timeout_s=5.0)
+    assert r.input_tokens == 5 // 4 + 1 == 2

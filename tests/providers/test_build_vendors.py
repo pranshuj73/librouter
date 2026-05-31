@@ -69,3 +69,54 @@ def test_real_mode_single_key_builds_one():
     secrets = MockSecretsManager({"OPENAI_API_KEY": "sk-x"})
     vendors = build_vendors(_cfg("real"), secrets)
     assert set(vendors.keys()) == {"openai"}
+
+
+# --------------------------------------------------------------------- t-1 §19
+# Additions per docs/code-review/t-1.md §19.
+
+
+def test_vendor_constructor_failure_is_skipped(monkeypatch):
+    """Per t-1 §19 — `except Exception: log.exception` branch at
+    gateway/providers/__init__.py:66-67.
+
+    Provide only OpenAI and Anthropic keys (so Google is naturally skipped),
+    then break Anthropic's constructor and assert build_vendors returns just
+    OpenAI without raising.
+    """
+    # Import here so the monkeypatch targets the real (importable) class.
+    from gateway.providers import anthropic as anthropic_mod
+
+    def _bad_init(self, secrets):  # noqa: ARG001
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(anthropic_mod.AnthropicVendor, "__init__", _bad_init)
+
+    secrets = MockSecretsManager(
+        {"OPENAI_API_KEY": "sk-x", "ANTHROPIC_API_KEY": "ant-y"}
+    )
+    vendors = build_vendors(_cfg("real"), secrets)
+    assert set(vendors.keys()) == {"openai"}
+    assert "anthropic" not in vendors
+
+
+def test_mock_mode_ignores_real_keys():
+    """Per t-1 §19 — `provider_mode="mock"` returns mock vendors regardless of
+    real-mode keys present in the secrets manager.
+    """
+    from gateway.providers.mock import (
+        MockAnthropicVendor,
+        MockGoogleVendor,
+        MockOpenAIVendor,
+    )
+
+    secrets = MockSecretsManager(
+        {
+            "OPENAI_API_KEY": "sk-x",
+            "ANTHROPIC_API_KEY": "ant-y",
+            "GOOGLE_API_KEY": "g-z",
+        }
+    )
+    vendors = build_vendors(_cfg("mock"), secrets)
+    assert isinstance(vendors["openai"], MockOpenAIVendor)
+    assert isinstance(vendors["anthropic"], MockAnthropicVendor)
+    assert isinstance(vendors["google"], MockGoogleVendor)

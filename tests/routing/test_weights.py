@@ -11,7 +11,6 @@ TDD step 7. Pure math + seeded RNG — no Redis required. Verifies:
 
 from __future__ import annotations
 
-import math
 import random
 from collections import Counter
 
@@ -137,6 +136,9 @@ def test_pick_distribution_matches_ratios():
         assert c is not None
         counts[(c.provider, c.model)] += 1
     total = sum(counts.values())
+    # Per t-1 §14.2: assert total matches trials so a `None` pick (which would
+    # also fail the inner `assert c is not None`) can't silently shorten counts.
+    assert total == trials
     a = counts[("a", "x")] / total
     b = counts[("b", "y")] / total
     c = counts[("c", "z")] / total
@@ -220,6 +222,13 @@ def test_pick_missing_signals_treated_as_zero_weight():
 
 
 def test_signals_round_trip():
+    """Per t-1 §14.7 / §0: replace the `math.isfinite` no-op with a value check.
+
+    Inline math:
+      health = (1 - 0.1) * (3 / (3 + 0.5)) = 0.9 * (6/7) ~= 0.7714
+      budget = min(50/100, 500/1000) = 0.5
+      effective = 10 * 0.7714 * 0.5 ~= 3.857
+    """
     s = CandidateSignals(
         base_weight=10.0,
         error_rate=0.1,
@@ -230,21 +239,118 @@ def test_signals_round_trip():
         tpm_cap=1000,
         breaker=BreakerState.CLOSED,
     )
-    assert math.isfinite(
-        effective_weight(
-            base=s.base_weight,
-            health=health_score(
-                error_rate=s.error_rate,
-                mean_latency_s=s.mean_latency_s,
-                target_latency_s=3.0,
-            ),
-            budget=budget_score(
-                rpm_remaining=s.rpm_remaining,
-                rpm_cap=s.rpm_cap,
-                tpm_remaining=s.tpm_remaining,
-                tpm_cap=s.tpm_cap,
-            ),
-            breaker=s.breaker,
-            floor=0.02,
-        )
+    w = effective_weight(
+        base=s.base_weight,
+        health=health_score(
+            error_rate=s.error_rate,
+            mean_latency_s=s.mean_latency_s,
+            target_latency_s=3.0,
+        ),
+        budget=budget_score(
+            rpm_remaining=s.rpm_remaining,
+            rpm_cap=s.rpm_cap,
+            tpm_remaining=s.tpm_remaining,
+            tpm_cap=s.tpm_cap,
+        ),
+        breaker=s.breaker,
+        floor=0.02,
     )
+    assert w == pytest.approx(3.857, rel=0.01)
+
+
+# ---------------------------------------------------------------- §14 additions
+
+
+def test_half_open_candidate_is_pickable():
+    """HALF_OPEN is treated like CLOSED at the weights layer.
+
+    `effective_weight` only zeros on `BreakerState.OPEN`. HALF_OPEN
+    candidates therefore stay pickable so probes can flow through the
+    normal routing path. Documents this design decision (t-1 §14
+    Missing scenarios).
+    """
+    cfg = RoutingConfig()
+    engine = WeightEngine(routing=cfg)
+    sigs: dict[CandidateRef, CandidateSignals] = {
+        CandidateRef(provider="a", model="x"): CandidateSignals(
+            base_weight=50.0,
+            error_rate=0.0,
+            mean_latency_s=0.5,
+            rpm_remaining=100,
+            rpm_cap=100,
+            tpm_remaining=1000,
+            tpm_cap=1000,
+            breaker=BreakerState.HALF_OPEN,
+        ),
+        CandidateRef(provider="b", model="y"): CandidateSignals(
+            base_weight=0.0,  # zero-weight closed candidate => never picked
+            error_rate=0.0,
+            mean_latency_s=0.5,
+            rpm_remaining=100,
+            rpm_cap=100,
+            tpm_remaining=1000,
+            tpm_cap=1000,
+            breaker=BreakerState.CLOSED,
+        ),
+    }
+    engine.update_cache(sigs)
+    tier = [
+        TierEntry(provider="a", model="x", weight=50.0),
+        TierEntry(provider="b", model="y", weight=0.0),
+    ]
+    rng = random.Random(0)
+    picks = {engine.pick(tier, exclude=set(), rng=rng) for _ in range(50)}
+    # HALF_OPEN got picked at least once; the zero-weighted closed candidate
+    # never wins. Allow a `None` only if cumulative-rounding edge fires; we
+    # assert HALF_OPEN was definitely seen.
+    assert CandidateRef(provider="a", model="x") in picks
+    assert CandidateRef(provider="b", model="y") not in picks
+
+
+def test_pick_empty_tier_returns_none():
+    """`pick([], ...)` short-circuits to None."""
+    cfg = RoutingConfig()
+    engine = WeightEngine(routing=cfg)
+    engine.update_cache(_all_healthy_signals())
+    assert engine.pick([], exclude=set(), rng=random.Random(0)) is None
+
+
+def test_weight_at_floor_is_pickable():
+    """When `effective_weight == floor` exactly, the code uses `>= floor`.
+
+    Construct base=0.02, health=1.0, budget=1.0 => w=0.02, floor=0.02.
+    `effective_weight` returns 0.02 (kept). The engine should then pick it.
+    """
+    # Confirm the pure function first.
+    w = effective_weight(
+        base=0.02,
+        health=1.0,
+        budget=1.0,
+        breaker=BreakerState.CLOSED,
+        floor=0.02,
+    )
+    assert w == pytest.approx(0.02)
+
+    # Now drive through the engine: configure floor=0.02, build signals that
+    # produce exactly w=0.02 for the sole candidate.
+    cfg = RoutingConfig(min_weight_floor=0.02)
+    engine = WeightEngine(routing=cfg)
+    cand = CandidateRef(provider="a", model="x")
+    engine.update_cache(
+        {
+            cand: CandidateSignals(
+                base_weight=0.02,
+                error_rate=0.0,
+                mean_latency_s=0.0,  # health = 1.0 * (3 / (3 + 0)) = 1.0
+                rpm_remaining=100,
+                rpm_cap=100,
+                tpm_remaining=1000,
+                tpm_cap=1000,
+                breaker=BreakerState.CLOSED,
+            ),
+        }
+    )
+    tier = [TierEntry(provider="a", model="x", weight=0.02)]
+    rng = random.Random(0)
+    picked = engine.pick(tier, exclude=set(), rng=rng)
+    assert picked == cand

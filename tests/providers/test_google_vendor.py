@@ -9,6 +9,7 @@ import pytest
 from gateway.errors import (
     AuthError,
     BadRequest,
+    ContentFiltered,
     RateLimited,
     Transient5xx,
 )
@@ -123,3 +124,122 @@ async def test_400_maps_to_bad_request(monkeypatch):
     )
     with pytest.raises(BadRequest):
         await v.chat("gemini-flash", _msg(), _params(), timeout_s=5.0)
+
+
+# --------------------------------------------------------------------- t-1 §18
+# Additions per docs/code-review/t-1.md §18 — uncovered branches in
+# gateway/providers/google.py (SAFETY mapping, parts-fallback, missing usage,
+# empty candidates, generic exception, assistant→model conversion).
+
+
+async def test_finish_reason_with_safety_raises_content_filtered(monkeypatch):
+    """Per t-1 §18 + gateway/providers/google.py:114-115."""
+    v = _vendor()
+    candidate = SimpleNamespace(
+        finish_reason="STOP_SAFETY",
+        content=SimpleNamespace(parts=[SimpleNamespace(text="blocked")]),
+    )
+    payload = SimpleNamespace(
+        text="blocked",
+        candidates=[candidate],
+        usage_metadata=SimpleNamespace(prompt_token_count=1, candidates_token_count=0),
+        response_id="rid-safe",
+    )
+    monkeypatch.setattr(
+        v._client.aio.models, "generate_content", _stub_generate(returns=payload)
+    )
+    with pytest.raises(ContentFiltered):
+        await v.chat("gemini-flash", _msg(), _params(), timeout_s=5.0)
+
+
+async def test_resp_text_none_falls_back_to_candidate_parts(monkeypatch):
+    """Per t-1 §18 — gateway/providers/google.py:98-106 parts-concat fallback."""
+    v = _vendor()
+    candidate = SimpleNamespace(
+        finish_reason="STOP",
+        content=SimpleNamespace(parts=[SimpleNamespace(text="from-parts")]),
+    )
+    payload = SimpleNamespace(
+        text=None,
+        candidates=[candidate],
+        usage_metadata=SimpleNamespace(prompt_token_count=2, candidates_token_count=3),
+        response_id="rid-parts",
+    )
+    monkeypatch.setattr(
+        v._client.aio.models, "generate_content", _stub_generate(returns=payload)
+    )
+    r = await v.chat("gemini-flash", _msg(), _params(), timeout_s=5.0)
+    assert r.text == "from-parts"
+
+
+async def test_usage_metadata_none_defaults_to_zero(monkeypatch):
+    """Per t-1 §18 — `getattr(usage, ..., 0) or 0` with usage_metadata=None."""
+    v = _vendor()
+    candidate = SimpleNamespace(
+        finish_reason="STOP",
+        content=SimpleNamespace(parts=[SimpleNamespace(text="hi")]),
+    )
+    payload = SimpleNamespace(
+        text="hi",
+        candidates=[candidate],
+        usage_metadata=None,
+        response_id="rid-no-usage",
+    )
+    monkeypatch.setattr(
+        v._client.aio.models, "generate_content", _stub_generate(returns=payload)
+    )
+    r = await v.chat("gemini-flash", _msg(), _params(), timeout_s=5.0)
+    assert r.input_tokens == 0
+    assert r.output_tokens == 0
+
+
+async def test_empty_candidates_yields_none_finish_reason(monkeypatch):
+    """Per t-1 §18 — `candidates=[]` → no finish_reason, no exception."""
+    v = _vendor()
+    payload = SimpleNamespace(
+        text="ok",
+        candidates=[],
+        usage_metadata=SimpleNamespace(prompt_token_count=1, candidates_token_count=1),
+        response_id="rid-no-cand",
+    )
+    monkeypatch.setattr(
+        v._client.aio.models, "generate_content", _stub_generate(returns=payload)
+    )
+    r = await v.chat("gemini-flash", _msg(), _params(), timeout_s=5.0)
+    assert r.finish_reason is None
+    assert r.text == "ok"
+
+
+async def test_unknown_sdk_exception_maps_to_transient5xx(monkeypatch):
+    """Per t-1 §18 — defensive `except Exception` at google.py:93-94."""
+    v = _vendor()
+    monkeypatch.setattr(
+        v._client.aio.models,
+        "generate_content",
+        _stub_generate(raises=ValueError("oops")),
+    )
+    with pytest.raises(Transient5xx):
+        await v.chat("gemini-flash", _msg(), _params(), timeout_s=5.0)
+
+
+async def test_convert_messages_maps_assistant_to_model_role(monkeypatch):
+    """Per t-1 §18 — gateway/providers/google.py:_convert_messages role mapping."""
+    v = _vendor()
+    captured: dict = {}
+
+    async def _gen(**kwargs):
+        captured.update(kwargs)
+        return _success_payload()
+
+    monkeypatch.setattr(v._client.aio.models, "generate_content", _gen)
+
+    messages = [
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="hello"),
+    ]
+    await v.chat("gemini-flash", messages, _params(), timeout_s=5.0)
+
+    contents = captured["contents"]
+    assert len(contents) == 2
+    assert contents[0]["role"] == "user"
+    assert contents[1]["role"] == "model"
