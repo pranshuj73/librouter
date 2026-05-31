@@ -16,9 +16,9 @@ from gateway.breaker import BreakerSet, BreakerState
 from gateway.models import (
     CandidateRef,
     Config,
-    PriceEntry,
     RateLimitEntry,
     RoutingConfig,
+    TierConfig,
     TierEntry,
 )
 from gateway.ratelimit import RedisTokenBucket
@@ -37,24 +37,20 @@ def _config() -> Config:
             "provider_mode": "mock",
             "secrets_mode": "mock",
             "tiers": {
-                "fast": [
-                    {"provider": "openai", "model": "gpt-4o-mini", "weight": 50.0},
-                    {"provider": "anthropic", "model": "claude-haiku-4-5", "weight": 30.0},
-                ],
+                "fast": {
+                    "candidates": [
+                        {"provider": "openai", "model": "gpt-4o-mini", "weight": 50.0,
+                         "rate_limits": {"rpm": 100, "tpm": 10000}},
+                        {"provider": "anthropic", "model": "claude-haiku-4-5", "weight": 30.0,
+                         "rate_limits": {"rpm": 60, "tpm": 6000}},
+                    ],
+                },
             },
             "routing": {
                 "refresh_interval_ms": 1000,
                 "health_window_s": 60,
                 "target_latency_s": 3.0,
                 "min_weight_floor": 0.02,
-            },
-            "prices": {
-                "openai/gpt-4o-mini": {"input": 0.15, "output": 0.6},
-                "anthropic/claude-haiku-4-5": {"input": 1.0, "output": 5.0},
-            },
-            "rate_limits": {
-                "openai/gpt-4o-mini": {"rpm": 100, "tpm": 10000},
-                "anthropic/claude-haiku-4-5": {"rpm": 60, "tpm": 6000},
             },
             "callers": [{"name": "test", "key_hash": "sha256:abc"}],
         }
@@ -70,7 +66,11 @@ async def env(redis):
     cfg = _config()
     obs = Observer(state=state, window_s=60, now_s_fn=lambda: clock_obs[0])
     bk = BreakerSet(state=state, now_s_fn=lambda: clock_bk[0])
-    limits = cfg.rate_limits
+    limits = {
+        f"{c.provider}/{c.model}": c.rate_limits
+        for tc in cfg.tiers.values()
+        for c in tc.candidates
+    }
     rb = RedisTokenBucket(state=state, limits=limits, now_ms_fn=lambda: int(clock_obs[0] * 1000))
     return cfg, obs, rb, bk, clock_obs, clock_bk
 
@@ -128,7 +128,7 @@ async def test_signals_feed_weight_engine(env):
     eng.update_cache(sigs)
     # Without any errors recorded, picking should succeed for the fast tier.
     import random
-    picked = eng.pick(cfg.tiers["fast"], exclude=set(), rng=random.Random(0))
+    picked = eng.pick(cfg.tiers["fast"].candidates, exclude=set(), rng=random.Random(0))
     assert picked is not None
 
 
@@ -236,24 +236,24 @@ async def test_build_signals_dedups_same_candidate_in_multiple_tiers(env):
             "provider_mode": "mock",
             "secrets_mode": "mock",
             "tiers": {
-                "fast": [
-                    {"provider": "openai", "model": "gpt-4o-mini", "weight": 50.0},
-                ],
-                "smart": [
-                    {"provider": "openai", "model": "gpt-4o-mini", "weight": 99.0},
-                ],
+                "fast": {
+                    "candidates": [
+                        {"provider": "openai", "model": "gpt-4o-mini", "weight": 50.0,
+                         "rate_limits": {"rpm": 100, "tpm": 10000}},
+                    ],
+                },
+                "smart": {
+                    "candidates": [
+                        {"provider": "openai", "model": "gpt-4o-mini", "weight": 99.0,
+                         "rate_limits": {"rpm": 100, "tpm": 10000}},
+                    ],
+                },
             },
             "routing": {
                 "refresh_interval_ms": 1000,
                 "health_window_s": 60,
                 "target_latency_s": 3.0,
                 "min_weight_floor": 0.02,
-            },
-            "prices": {
-                "openai/gpt-4o-mini": {"input": 0.15, "output": 0.6},
-            },
-            "rate_limits": {
-                "openai/gpt-4o-mini": {"rpm": 100, "tpm": 10000},
             },
             "callers": [{"name": "test", "key_hash": "sha256:abc"}],
         }

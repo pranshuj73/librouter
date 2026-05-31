@@ -170,10 +170,6 @@ class TestNoRedactionAtDebug:
 # Config package import surface
 
 class TestConfigPackageExports:
-    def test_exports_load_config(self):
-        from gateway.config import load_config  # noqa: F401
-        assert callable(load_config)
-
     def test_exports_config_holder(self):
         from gateway.config import ConfigHolder  # noqa: F401
         assert ConfigHolder is not None

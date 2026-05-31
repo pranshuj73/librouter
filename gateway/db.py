@@ -8,6 +8,7 @@ safe and tests can call it freely.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,6 +161,88 @@ class Database:
                 today_start,
             )
         return int(val or 0)
+
+    # ---------------------------------------------------------------- config tables (new in 0003)
+
+    async def fetch_tiers(self) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT name, fallback_tier FROM tiers ORDER BY name")
+        return [dict(r) for r in rows]
+
+    async def upsert_tier(self, *, name: str, fallback_tier: str | None) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO tiers (name, fallback_tier)
+                VALUES ($1, $2)
+                ON CONFLICT (name) DO UPDATE
+                  SET fallback_tier = EXCLUDED.fallback_tier
+                """,
+                name,
+                fallback_tier,
+            )
+
+    async def fetch_tier_models(self) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT provider, config FROM tier_models ORDER BY provider")
+        return [{"provider": r["provider"], "config": json.loads(r["config"])} for r in rows]
+
+    async def upsert_tier_models(self, *, provider: str, config: dict) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO tier_models (provider, config)
+                VALUES ($1, $2::jsonb)
+                ON CONFLICT (provider) DO UPDATE
+                  SET config = EXCLUDED.config
+                """,
+                provider,
+                json.dumps(config),
+            )
+
+    async def fetch_routing_config(self) -> dict | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT refresh_interval_ms, health_window_s, target_latency_s,
+                       min_weight_floor, rng_seed_env
+                FROM routing_config
+                WHERE id = 1
+                """
+            )
+        if row is None:
+            return None
+        return dict(row)
+
+    async def upsert_routing_config(
+        self,
+        *,
+        refresh_interval_ms: int,
+        health_window_s: int,
+        target_latency_s: float,
+        min_weight_floor: float,
+        rng_seed_env: str | None,
+    ) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO routing_config
+                    (id, refresh_interval_ms, health_window_s,
+                     target_latency_s, min_weight_floor, rng_seed_env)
+                VALUES (1, $1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO UPDATE
+                  SET refresh_interval_ms = EXCLUDED.refresh_interval_ms,
+                      health_window_s     = EXCLUDED.health_window_s,
+                      target_latency_s    = EXCLUDED.target_latency_s,
+                      min_weight_floor    = EXCLUDED.min_weight_floor,
+                      rng_seed_env        = EXCLUDED.rng_seed_env
+                """,
+                refresh_interval_ms,
+                health_window_s,
+                target_latency_s,
+                min_weight_floor,
+                rng_seed_env,
+            )
 
     async def usage_summary(
         self, *, caller: str | None = None, since: datetime | None = None

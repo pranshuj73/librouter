@@ -53,27 +53,22 @@ def _config() -> Config:
             "provider_mode": "mock",
             "secrets_mode": "mock",
             "tiers": {
-                "fast": [
-                    {"provider": "openai", "model": "gpt-4o-mini", "weight": 33.0},
-                    {"provider": "anthropic", "model": "claude-haiku-4-5", "weight": 33.0},
-                    {"provider": "google", "model": "gemini-2.5-flash", "weight": 33.0},
-                ],
+                "fast": {
+                    "candidates": [
+                        {"provider": "openai", "model": "gpt-4o-mini", "weight": 33.0,
+                         "rate_limits": {"rpm": 1000, "tpm": 100_000}},
+                        {"provider": "anthropic", "model": "claude-haiku-4-5", "weight": 33.0,
+                         "rate_limits": {"rpm": 1000, "tpm": 100_000}},
+                        {"provider": "google", "model": "gemini-2.5-flash", "weight": 33.0,
+                         "rate_limits": {"rpm": 1000, "tpm": 100_000}},
+                    ],
+                },
             },
             "routing": {
                 "refresh_interval_ms": 100,
                 "health_window_s": 60,
                 "target_latency_s": 3.0,
                 "min_weight_floor": 0.001,
-            },
-            "prices": {
-                "openai/gpt-4o-mini": {"input": 0.15, "output": 0.6},
-                "anthropic/claude-haiku-4-5": {"input": 1.0, "output": 5.0},
-                "google/gemini-2.5-flash": {"input": 0.3, "output": 2.5},
-            },
-            "rate_limits": {
-                "openai/gpt-4o-mini": {"rpm": 1000, "tpm": 100_000},
-                "anthropic/claude-haiku-4-5": {"rpm": 1000, "tpm": 100_000},
-                "google/gemini-2.5-flash": {"rpm": 1000, "tpm": 100_000},
             },
             "callers": [
                 {"name": "test", "key_hash": "sha256:abc", "daily_token_cap": 1_000_000}
@@ -131,9 +126,14 @@ async def harness(redis):
     def deadline_now() -> float:
         return deadline_clock[0]
 
+    _limits = {
+        f"{c.provider}/{c.model}": c.rate_limits
+        for tc in cfg.tiers.values()
+        for c in tc.candidates
+    }
     obs = Observer(state=state, window_s=60, now_s_fn=lambda: obs_clock[0])
     bk = BreakerSet(state=state, now_s_fn=lambda: bk_clock[0])
-    rb = RedisTokenBucket(state=state, limits=cfg.rate_limits, now_ms_fn=lambda: rb_clock[0])
+    rb = RedisTokenBucket(state=state, limits=_limits, now_ms_fn=lambda: rb_clock[0])
 
     engine = WeightEngine(routing=cfg.routing)
     engine.update_cache(await build_signals(cfg, obs, rb, bk))
@@ -326,9 +326,14 @@ async def test_per_attempt_timeout_shrinks_near_deadline(redis):
     for v in vendors.values():
         v.queue_success()
 
+    _lims = {
+        f"{c.provider}/{c.model}": c.rate_limits
+        for tc in cfg.tiers.values()
+        for c in tc.candidates
+    }
     obs = Observer(state=state, window_s=60, now_s_fn=lambda: 0.0)
     bk = BreakerSet(state=state, now_s_fn=lambda: 0.0)
-    rb = RedisTokenBucket(state=state, limits=cfg.rate_limits, now_ms_fn=lambda: 0)
+    rb = RedisTokenBucket(state=state, limits=_lims, now_ms_fn=lambda: 0)
     engine = WeightEngine(routing=cfg.routing)
     engine.update_cache(await build_signals(cfg, obs, rb, bk))
 
@@ -396,9 +401,13 @@ async def test_breaker_open_candidate_not_picked(harness):
 async def test_empty_bucket_causes_repick(harness):
     router = harness.router
     rb = harness.rb
-    # Drain anthropic RPM completely
+    # Drain anthropic RPM completely — look up limit via tier candidate.
     cfg = harness.cfg
-    for _ in range(cfg.rate_limits["anthropic/claude-haiku-4-5"].rpm + 1):
+    anthropic_cand = next(
+        c for tc in cfg.tiers.values() for c in tc.candidates
+        if c.provider == "anthropic" and c.model == "claude-haiku-4-5"
+    )
+    for _ in range(anthropic_cand.rate_limits.rpm + 1):
         await rb.try_acquire("anthropic", "claude-haiku-4-5", request_tokens=1)
     # Now route many times; if anthropic ever gets first-picked, the bucket
     # acquire will fail and the router repicks. Result must still be ok AND
@@ -428,9 +437,14 @@ async def test_vendor_missing_skips_candidate(redis):
         "openai": MockOpenAIVendor(sec_mgr),
         "anthropic": MockAnthropicVendor(sec_mgr),
     }
+    _lims_missing = {
+        f"{c.provider}/{c.model}": c.rate_limits
+        for tc in cfg.tiers.values()
+        for c in tc.candidates
+    }
     obs = Observer(state=state, window_s=60, now_s_fn=lambda: 0.0)
     bk = BreakerSet(state=state, now_s_fn=lambda: 0.0)
-    rb = RedisTokenBucket(state=state, limits=cfg.rate_limits, now_ms_fn=lambda: 0)
+    rb = RedisTokenBucket(state=state, limits=_lims_missing, now_ms_fn=lambda: 0)
     engine = WeightEngine(routing=cfg.routing)
     engine.update_cache(await build_signals(cfg, obs, rb, bk))
     router = Router(
@@ -445,22 +459,23 @@ async def test_vendor_missing_skips_candidate(redis):
 
     saw_vendor_missing = False
     for _ in range(40):
-        # Capture tried via instrumenting: run the route and read attempts.
-        # The successful attempt is always non-google. If google was picked
-        # first, it would have been logged as vendor_missing — observed by
-        # the fact that a successful non-google attempt has attempt_idx==0
-        # (router didn't record vendor_missing as an AttemptRecord; only in
-        # tried). So we inspect by routing repeatedly and ensuring google
-        # never resolves.
         result = await router.route(_req(), _caller())
         assert result.attempts[-1].provider != "google"
 
     # Now force google to be picked first by excluding others via empty
     # buckets, then assert vendor_missing surfaces in `tried` on the
     # resulting RouterError. Drain openai and anthropic.
-    for _ in range(cfg.rate_limits["openai/gpt-4o-mini"].rpm + 1):
+    openai_cand = next(
+        c for tc in cfg.tiers.values() for c in tc.candidates
+        if c.provider == "openai" and c.model == "gpt-4o-mini"
+    )
+    anthropic_cand = next(
+        c for tc in cfg.tiers.values() for c in tc.candidates
+        if c.provider == "anthropic" and c.model == "claude-haiku-4-5"
+    )
+    for _ in range(openai_cand.rate_limits.rpm + 1):
         await rb.try_acquire("openai", "gpt-4o-mini", request_tokens=1)
-    for _ in range(cfg.rate_limits["anthropic/claude-haiku-4-5"].rpm + 1):
+    for _ in range(anthropic_cand.rate_limits.rpm + 1):
         await rb.try_acquire("anthropic", "claude-haiku-4-5", request_tokens=1)
 
     with pytest.raises(RouterError) as exc:
@@ -526,18 +541,19 @@ async def test_cost_is_zero_when_price_missing(redis):
             "provider_mode": "mock",
             "secrets_mode": "mock",
             "tiers": {
-                "fast": [
-                    {"provider": "google", "model": unknown_model, "weight": 100.0},
-                ],
+                "fast": {
+                    "candidates": [
+                        {
+                            "provider": "google",
+                            "model": unknown_model,
+                            "weight": 100.0,
+                            "rate_limits": {"rpm": 1000, "tpm": 100_000},
+                        },
+                    ],
+                },
             },
             "routing": {"refresh_interval_ms": 100, "health_window_s": 60,
                         "target_latency_s": 3.0, "min_weight_floor": 0.001},
-            "prices": {
-                f"google/{unknown_model}": {"input": 0.3, "output": 2.5},
-            },
-            "rate_limits": {
-                f"google/{unknown_model}": {"rpm": 1000, "tpm": 100_000},
-            },
             "callers": [{"name": "test", "key_hash": "sha256:abc",
                          "daily_token_cap": 1_000_000}],
         }
@@ -545,9 +561,14 @@ async def test_cost_is_zero_when_price_missing(redis):
 
     sec_mgr = MockSecretsManager()
     vendors = {"google": MockGoogleVendor(sec_mgr)}
+    _lims_zero = {
+        f"{c.provider}/{c.model}": c.rate_limits
+        for tc in cfg.tiers.values()
+        for c in tc.candidates
+    }
     obs = Observer(state=state, window_s=60, now_s_fn=lambda: 0.0)
     bk = BreakerSet(state=state, now_s_fn=lambda: 0.0)
-    rb = RedisTokenBucket(state=state, limits=cfg.rate_limits, now_ms_fn=lambda: 0)
+    rb = RedisTokenBucket(state=state, limits=_lims_zero, now_ms_fn=lambda: 0)
     engine = WeightEngine(routing=cfg.routing)
     engine.update_cache(await build_signals(cfg, obs, rb, bk))
 
@@ -654,10 +675,10 @@ async def test_failed_attempt_recorded_in_observe(harness):
     winner_provider = result.attempts[1].provider
 
     failed_cand = next(
-        c for c in cfg.tiers["fast"] if c.provider == failed_provider
+        c for c in cfg.tiers["fast"].candidates if c.provider == failed_provider
     )
     winner_cand = next(
-        c for c in cfg.tiers["fast"] if c.provider == winner_provider
+        c for c in cfg.tiers["fast"].candidates if c.provider == winner_provider
     )
 
     from gateway.models import CandidateRef

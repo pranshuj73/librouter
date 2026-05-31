@@ -52,26 +52,26 @@ SecretsMode = Literal["mock", "env"]
 # ---------------------------------------------------------------- Config
 
 
+class RateLimitEntry(BaseModel):
+    """Per-minute fleet-wide rate limits."""
+
+    rpm: PositiveInt
+    tpm: PositiveInt
+
+
 class TierEntry(BaseModel):
     """One candidate in a tier's candidate list."""
 
     provider: str
     model: str
     weight: NonNegativeFloat
+    rate_limits: RateLimitEntry
 
 
-class PriceEntry(BaseModel):
-    """USD per 1M tokens, per (provider, model)."""
+class TierConfig(BaseModel):
+    """Configuration for one logical tier (e.g. 'fast', 'smart')."""
 
-    input: NonNegativeFloat
-    output: NonNegativeFloat
-
-
-class RateLimitEntry(BaseModel):
-    """Per-minute fleet-wide rate limits."""
-
-    rpm: PositiveInt
-    tpm: PositiveInt
+    candidates: list[TierEntry]
 
 
 class CallerEntry(BaseModel):
@@ -92,31 +92,21 @@ class RoutingConfig(BaseModel):
 
 
 class Config(BaseModel):
-    """Top-level YAML schema."""
+    """Top-level gateway configuration — loaded from Postgres (not YAML)."""
 
     model_config = ConfigDict(extra="forbid")
 
     provider_mode: ProviderMode
     secrets_mode: SecretsMode
-    tiers: dict[str, list[TierEntry]]
+    tiers: dict[str, TierConfig]
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
-    prices: dict[str, PriceEntry]
-    rate_limits: dict[str, RateLimitEntry]
-    callers: list[CallerEntry]
+    callers: list[CallerEntry] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _cross_validate_candidates_have_pricing_and_limits(self) -> "Config":
-        for tier_name, candidates in self.tiers.items():
-            for cand in candidates:
-                key = f"{cand.provider}/{cand.model}"
-                if key not in self.prices:
-                    raise ValueError(
-                        f"tier {tier_name!r} candidate {key!r} has no price entry"
-                    )
-                if key not in self.rate_limits:
-                    raise ValueError(
-                        f"tier {tier_name!r} candidate {key!r} has no rate_limits entry"
-                    )
+    def _cross_validate_candidates_have_rate_limits(self) -> "Config":
+        # Pydantic already enforces the RateLimitEntry shape inside TierEntry.
+        # This validator is a final consistency pass — currently a no-op beyond
+        # the structural check, kept for extension points.
         return self
 
 

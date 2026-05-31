@@ -208,43 +208,18 @@ class TestUsageIDOR:
 
 
 class TestDsnRequired:
-    def test_real_mode_without_dsn_raises_runtime_error(self, monkeypatch, tmp_path):
-        """Starting the app with provider_mode=real and no GATEWAY_DB_DSN must
-        raise RuntimeError during lifespan startup.
+    def test_real_mode_without_dsn_raises_runtime_error(self, monkeypatch):
+        """Starting the app with GATEWAY_PROVIDER_MODE=real and no GATEWAY_DB_DSN
+        must raise RuntimeError during lifespan startup.
+
+        Config is now loaded from DB, not YAML. The DSN check happens before
+        the DB connection is attempted, so no real DB is needed for this test.
         """
-        import yaml
         from fastapi.testclient import TestClient
 
-        cfg = {
-            "provider_mode": "real",
-            "secrets_mode": "mock",
-            "tiers": {
-                "fast": [
-                    {"provider": "openai", "model": "gpt-4o-mini", "weight": 100.0}
-                ]
-            },
-            "routing": {
-                "refresh_interval_ms": 5000,
-                "health_window_s": 60,
-                "target_latency_s": 3.0,
-                "min_weight_floor": 0.001,
-            },
-            "prices": {
-                "openai/gpt-4o-mini": {"input": 0.15, "output": 0.6},
-            },
-            "rate_limits": {
-                "openai/gpt-4o-mini": {"rpm": 100, "tpm": 10000},
-            },
-            "callers": [
-                {"name": "test", "key_hash": "sha256:abc", "daily_token_cap": 1000},
-            ],
-        }
-        cfg_path = tmp_path / "config.yaml"
-        cfg_path.write_text(yaml.safe_dump(cfg))
-
-        monkeypatch.setenv("GATEWAY_CONFIG", str(cfg_path))
         monkeypatch.setenv("GATEWAY_PROVIDER_MODE", "real")
         monkeypatch.delenv("GATEWAY_DB_DSN", raising=False)
+        monkeypatch.delenv("GATEWAY_CONFIG", raising=False)
 
         # Re-import the app module so the lifespan picks up the new env.
         import sys

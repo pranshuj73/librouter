@@ -167,7 +167,7 @@ class Router:
                 break
 
             cand = self._engine.pick(
-                self._cfg.tiers[tier], exclude=exclude, rng=self._rng
+                self._cfg.tiers[tier].candidates, exclude=exclude, rng=self._rng
             )
             if cand is None:
                 break

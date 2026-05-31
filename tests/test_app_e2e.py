@@ -22,7 +22,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 docker_mod = pytest.importorskip("docker")
 try:
@@ -121,15 +120,33 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
         redis_port = rd.get_exposed_port(6379)
         redis_url = f"redis://{redis_host}:{redis_port}/0"
 
-        cfg = {
+        callers_seed = [
+            {
+                "name": "e2e",
+                "key_hash": hash_api_key(CALLER_KEY, pepper=_TEST_PEPPER),
+                "daily_token_cap": 10000000,
+            },
+            {
+                # cr-1 §11.6: cap=1 makes the daily-cap test deterministic.
+                "name": "e2e-tight",
+                "key_hash": hash_api_key(TIGHT_KEY, pepper=_TEST_PEPPER),
+                "daily_token_cap": 1,
+            },
+        ]
+        cfg_data = {
             "provider_mode": "mock",
             "secrets_mode": "mock",
             "tiers": {
-                "fast": [
-                    {"provider": "openai", "model": "gpt-4o-mini", "weight": 50.0},
-                    {"provider": "anthropic", "model": "claude-haiku-4-5", "weight": 30.0},
-                    {"provider": "google", "model": "gemini-2.5-flash", "weight": 20.0},
-                ],
+                "fast": {
+                    "candidates": [
+                        {"provider": "openai", "model": "gpt-4o-mini", "weight": 50.0,
+                         "rate_limits": {"rpm": 100000, "tpm": 10000000}},
+                        {"provider": "anthropic", "model": "claude-haiku-4-5", "weight": 30.0,
+                         "rate_limits": {"rpm": 100000, "tpm": 10000000}},
+                        {"provider": "google", "model": "gemini-2.5-flash", "weight": 20.0,
+                         "rate_limits": {"rpm": 100000, "tpm": 10000000}},
+                    ],
+                },
             },
             "routing": {
                 "refresh_interval_ms": 100,
@@ -137,37 +154,10 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
                 "target_latency_s": 3.0,
                 "min_weight_floor": 0.001,
             },
-            "prices": {
-                "openai/gpt-4o-mini": {"input": 0.15, "output": 0.6},
-                "anthropic/claude-haiku-4-5": {"input": 1.0, "output": 5.0},
-                "google/gemini-2.5-flash": {"input": 0.3, "output": 2.5},
-            },
-            "rate_limits": {
-                "openai/gpt-4o-mini": {"rpm": 100000, "tpm": 10000000},
-                "anthropic/claude-haiku-4-5": {"rpm": 100000, "tpm": 10000000},
-                "google/gemini-2.5-flash": {"rpm": 100000, "tpm": 10000000},
-            },
-            "callers": [
-                {
-                    "name": "e2e",
-                    "key_hash": hash_api_key(CALLER_KEY, pepper=_TEST_PEPPER),
-                    "daily_token_cap": 10000000,
-                },
-                {
-                    # cr-1 §11.6: cap=1 makes the daily-cap test deterministic.
-                    # The check is `used >= cap` BEFORE the call, so the first
-                    # request still succeeds (used==0); the second is blocked.
-                    "name": "e2e-tight",
-                    "key_hash": hash_api_key(TIGHT_KEY, pepper=_TEST_PEPPER),
-                    "daily_token_cap": 1,
-                },
-            ],
+            "callers": [],
         }
-        cfg_path = tmp_path_factory.mktemp("conf") / "config.yaml"
-        cfg_path.write_text(yaml.safe_dump(cfg))
 
         with mp.context() as m:
-            m.setenv("GATEWAY_CONFIG", str(cfg_path))
             m.setenv("GATEWAY_DB_DSN", pg_dsn)
             m.setenv("GATEWAY_REDIS_URL", redis_url)
             m.setenv("GATEWAY_PROVIDER_MODE", "mock")
@@ -178,30 +168,41 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
             # cr-1 §3.1: seed the key hash pepper so CallerResolver can be
             # constructed in the lifespan.
             m.setenv("GATEWAY_KEY_HASH_PEPPER", _TEST_PEPPER)
-            # cr-1 §2.2 recommends gating boot-time caller upsert; until that
-            # lands, seeding happens unconditionally (no GATEWAY_SEED_CALLERS).
 
             # Reset Prometheus state before importing the app so any
             # earlier-module test pollution does not leak into our scrapes
             # (cr-1 §11.1, §11.8).
             _reset_prometheus_registry()
 
-            # Seed DB before booting the app — the app no longer seeds at
-            # startup.
+            # Seed DB before booting the app — config now lives in Postgres.
             import asyncio
+            import redis.asyncio as redis_async
             from gateway.db import Database
+            from gateway.models import Config
+            from gateway.redis_state import RedisState
+            from gateway.config_store import ConfigStore
 
             async def _setup_db() -> None:
                 boot_db = Database(dsn=pg_dsn)
                 await boot_db.connect()
                 await boot_db.run_migrations()
-                for c in cfg["callers"]:
+
+                r = redis_async.from_url(redis_url, decode_responses=False)
+                state = RedisState(r)
+                await state.load_scripts()
+                store = ConfigStore(db=boot_db, redis_state=state)
+
+                cfg_obj = Config.model_validate(cfg_data)
+                await store.write(cfg_obj)
+
+                for c in callers_seed:
                     await boot_db.upsert_caller(
                         name=c["name"],
                         key_hash=c["key_hash"],
                         daily_token_cap=c["daily_token_cap"],
                         enabled=True,
                     )
+                await r.aclose()
                 await boot_db.close()
 
             asyncio.get_event_loop().run_until_complete(_setup_db())

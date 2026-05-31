@@ -23,20 +23,22 @@ from gateway.routing.weights import CandidateSignals, WeightEngine
 log = logging.getLogger(__name__)
 
 
-def _all_candidates(cfg: Config) -> Iterable[tuple[CandidateRef, float]]:
-    """Yield every (candidate, base_weight) across all tiers, deduplicated.
+def _all_candidates(cfg: Config) -> Iterable[tuple[CandidateRef, float, "RateLimitEntry"]]:
+    """Yield every (candidate_ref, base_weight, rate_limits) across all tiers, deduplicated.
 
     If the same (provider, model) appears in multiple tiers with different
     base weights, the first occurrence wins. This is a config smell — we'd
     typically reject it in models.py — but we tolerate it here so the
     refresh task can't blow up at runtime on configs that snuck through.
     """
-    seen: dict[CandidateRef, float] = {}
-    for tier_candidates in cfg.tiers.values():
-        for t in tier_candidates:
+    from gateway.models import RateLimitEntry  # local import avoids circular at module level
+
+    seen: dict[CandidateRef, tuple[float, RateLimitEntry]] = {}
+    for tier_cfg in cfg.tiers.values():
+        for t in tier_cfg.candidates:
             ref = CandidateRef(provider=t.provider, model=t.model)
-            seen.setdefault(ref, t.weight)
-    return seen.items()
+            seen.setdefault(ref, (t.weight, t.rate_limits))
+    return ((ref, weight, rl) for ref, (weight, rl) in seen.items())
 
 
 async def build_signals(
@@ -57,11 +59,9 @@ async def build_signals(
     # Make sure the breaker snapshot is up to date before reading state.
     await breakers.refresh_snapshot()
 
-    for cand, base_weight in _all_candidates(cfg):
+    for cand, base_weight, rl in _all_candidates(cfg):
         if available_providers is not None and cand.provider not in available_providers:
             continue
-        key = f"{cand.provider}/{cand.model}"
-        rl = cfg.rate_limits[key]
 
         agg = await observer.aggregate(cand)
         rpm_remaining, tpm_remaining = await bucket.remaining(cand.provider, cand.model)

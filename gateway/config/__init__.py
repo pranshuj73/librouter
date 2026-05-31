@@ -1,18 +1,14 @@
-"""Load + SIGHUP-reload `Config` from a YAML file.
+"""ConfigHolder + SIGHUP-reload wiring.
 
-In production we run `Config.model_validate(...)` once at boot. SIGHUP rereads
-the same file and atomically swaps the in-memory config. On validation
-failure the previous config is kept and the error is logged + alerted on.
+Config is now loaded from Postgres (via ConfigStore), not a YAML file.
+SIGHUP triggers a force-refresh from DB + Redis-cache invalidation.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
 import signal
-from pathlib import Path
-
-import yaml
 
 from gateway.models import Config
 
@@ -20,30 +16,44 @@ from gateway.models import Config
 log = logging.getLogger(__name__)
 
 
-def load_config(path: str | os.PathLike[str]) -> Config:
-    raw = Path(path).read_text()
-    data = yaml.safe_load(raw)
-    return Config.model_validate(data)
-
-
 class ConfigHolder:
     """Mutable holder so dependents can pin a reference to the holder
     and always read the latest `.value`."""
 
-    def __init__(self, value: Config, source_path: str | None = None) -> None:
+    def __init__(self, value: Config, config_store=None) -> None:
         self.value = value
-        self.source_path = source_path
+        self._config_store = config_store
 
     def reload(self) -> None:
-        if not self.source_path:
-            log.warning("ConfigHolder.reload called but no source_path is set")
+        """Schedule an async force-refresh from DB.
+
+        SIGHUP handlers run in the main thread; we can't ``await`` here, so we
+        schedule the coroutine onto the running event loop.  If no loop is
+        running (e.g. during a test that never starts one) the reload is
+        skipped and a warning is logged.
+        """
+        if self._config_store is None:
+            log.warning(
+                "ConfigHolder.reload called but no config_store is wired — "
+                "assign holder._config_store after constructing the ConfigStore"
+            )
             return
+
         try:
-            new = load_config(self.source_path)
-            self.value = new
-            log.info("config reloaded from %s", self.source_path)
-        except Exception:
-            log.exception("config reload from %s failed; keeping old config", self.source_path)
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            log.warning("ConfigHolder.reload called outside a running event loop; skipping")
+            return
+
+        async def _do_reload() -> None:
+            try:
+                new = await self._config_store.load_or_refresh(force=True)
+                self.value = new
+                log.info("config reloaded from database via SIGHUP")
+            except Exception:
+                log.exception("config reload from DB failed; keeping old config")
+
+        loop.create_task(_do_reload(), name="sighup-config-reload")
 
 
 def install_sighup_reload(holder: ConfigHolder) -> None:

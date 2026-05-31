@@ -41,7 +41,8 @@ services:
       GATEWAY_REDIS_URL: redis://redis:6379/0
       # `.env` (gitignored) overrides any of the below via ${VAR:-default}.
       # See .env.example for the keys we read.
-      GATEWAY_CONFIG: ${GATEWAY_CONFIG:-/code/config.dev.yaml}
+      # Config is now loaded from Postgres (seeded by scripts/setup.sh).
+      # GATEWAY_CONFIG is no longer used.
       GATEWAY_PROVIDER_MODE: ${GATEWAY_PROVIDER_MODE:-mock}
       GATEWAY_SECRETS_MODE: ${GATEWAY_SECRETS_MODE:-mock}
       GATEWAY_LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-INFO}
@@ -49,8 +50,6 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-    volumes:
-      # Bind-mount configs so edits land without rebuilding the image.
-      - ./config.yaml:/code/config.yaml:ro
-      - ./config.dev.yaml:/code/config.dev.yaml:ro
+      GATEWAY_KEY_HASH_PEPPER: ${GATEWAY_KEY_HASH_PEPPER:-}
+      GATEWAY_METRICS_TOKEN: ${GATEWAY_METRICS_TOKEN:-}
     ports: ["8000:8000"]

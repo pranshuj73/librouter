@@ -43,14 +43,31 @@ async def redis():
 # Per §1 / §20 of the test review: hoist the duplicated `_config()` builders
 # out of `test_router.py`, `test_refresh.py`, `test_app_e2e.py`, and
 # `test_build_vendors.py`. The canonical shape is the 3-vendor "fast" tier
-# (openai/anthropic/google) with full price + rate_limit coverage.
+# (openai/anthropic/google) with rate_limits per candidate (new schema).
 
-_DEFAULT_TIERS: dict[str, list[dict[str, Any]]] = {
-    "fast": [
-        {"provider": "openai", "model": "gpt-4o-mini", "weight": 33.0},
-        {"provider": "anthropic", "model": "haiku", "weight": 33.0},
-        {"provider": "google", "model": "gemini-flash", "weight": 33.0},
-    ],
+_DEFAULT_TIERS: dict[str, dict[str, Any]] = {
+    "fast": {
+        "candidates": [
+            {
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "weight": 33.0,
+                "rate_limits": {"rpm": 1000, "tpm": 100_000},
+            },
+            {
+                "provider": "anthropic",
+                "model": "claude-haiku-4-5",
+                "weight": 33.0,
+                "rate_limits": {"rpm": 1000, "tpm": 100_000},
+            },
+            {
+                "provider": "google",
+                "model": "gemini-2.5-flash",
+                "weight": 33.0,
+                "rate_limits": {"rpm": 1000, "tpm": 100_000},
+            },
+        ],
+    },
 }
 
 _DEFAULT_ROUTING: dict[str, Any] = {
@@ -58,18 +75,6 @@ _DEFAULT_ROUTING: dict[str, Any] = {
     "health_window_s": 60,
     "target_latency_s": 3.0,
     "min_weight_floor": 0.001,
-}
-
-_DEFAULT_PRICES: dict[str, dict[str, float]] = {
-    "openai/gpt-4o-mini": {"input": 0.15, "output": 0.6},
-    "anthropic/haiku": {"input": 1.0, "output": 5.0},
-    "google/gemini-flash": {"input": 0.3, "output": 2.5},
-}
-
-_DEFAULT_RATE_LIMITS: dict[str, dict[str, int]] = {
-    "openai/gpt-4o-mini": {"rpm": 1000, "tpm": 100_000},
-    "anthropic/haiku": {"rpm": 1000, "tpm": 100_000},
-    "google/gemini-flash": {"rpm": 1000, "tpm": 100_000},
 }
 
 _DEFAULT_CALLERS: list[dict[str, Any]] = [
@@ -81,10 +86,8 @@ def make_config(
     *,
     provider_mode: str = "mock",
     secrets_mode: str = "mock",
-    tiers: dict[str, list[dict[str, Any]]] | None = None,
+    tiers: dict[str, Any] | None = None,
     routing: dict[str, Any] | None = None,
-    prices: dict[str, dict[str, float]] | None = None,
-    rate_limits: dict[str, dict[str, int]] | None = None,
     callers: list[dict[str, Any]] | None = None,
 ) -> Config:
     """Build a valid `Config` matching the 3-vendor "fast" tier shape.
@@ -92,16 +95,14 @@ def make_config(
     Any field is overridable; the defaults match the shape used in
     `test_router.py`, `test_refresh.py`, `test_build_vendors.py`, and
     `test_app_e2e.py`.
+
+    Rate-limits are now per-candidate inside each TierConfig, not top-level.
     """
     payload: dict[str, Any] = {
         "provider_mode": provider_mode,
         "secrets_mode": secrets_mode,
         "tiers": copy.deepcopy(tiers if tiers is not None else _DEFAULT_TIERS),
         "routing": copy.deepcopy(routing if routing is not None else _DEFAULT_ROUTING),
-        "prices": copy.deepcopy(prices if prices is not None else _DEFAULT_PRICES),
-        "rate_limits": copy.deepcopy(
-            rate_limits if rate_limits is not None else _DEFAULT_RATE_LIMITS
-        ),
         "callers": copy.deepcopy(callers if callers is not None else _DEFAULT_CALLERS),
     }
     return Config.model_validate(payload)

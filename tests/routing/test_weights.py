@@ -82,10 +82,12 @@ def test_effective_weight_zero_when_below_floor():
 
 
 def _three_candidate_tier() -> list[TierEntry]:
+    from gateway.models import RateLimitEntry
+    _rl = RateLimitEntry(rpm=100, tpm=10000)
     return [
-        TierEntry(provider="a", model="x", weight=50.0),
-        TierEntry(provider="b", model="y", weight=30.0),
-        TierEntry(provider="c", model="z", weight=20.0),
+        TierEntry(provider="a", model="x", weight=50.0, rate_limits=_rl),
+        TierEntry(provider="b", model="y", weight=30.0, rate_limits=_rl),
+        TierEntry(provider="c", model="z", weight=20.0, rate_limits=_rl),
     ]
 
 
@@ -294,9 +296,11 @@ def test_half_open_candidate_is_pickable():
         ),
     }
     engine.update_cache(sigs)
+    from gateway.models import RateLimitEntry
+    _rl = RateLimitEntry(rpm=100, tpm=10000)
     tier = [
-        TierEntry(provider="a", model="x", weight=50.0),
-        TierEntry(provider="b", model="y", weight=0.0),
+        TierEntry(provider="a", model="x", weight=50.0, rate_limits=_rl),
+        TierEntry(provider="b", model="y", weight=0.0, rate_limits=_rl),
     ]
     rng = random.Random(0)
     picks = {engine.pick(tier, exclude=set(), rng=rng) for _ in range(50)}
@@ -350,7 +354,9 @@ def test_weight_at_floor_is_pickable():
             ),
         }
     )
-    tier = [TierEntry(provider="a", model="x", weight=0.02)]
+    from gateway.models import RateLimitEntry
+    tier = [TierEntry(provider="a", model="x", weight=0.02,
+                      rate_limits=RateLimitEntry(rpm=100, tpm=10000))]
     rng = random.Random(0)
     picked = engine.pick(tier, exclude=set(), rng=rng)
     assert picked == cand

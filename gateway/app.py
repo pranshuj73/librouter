@@ -24,7 +24,8 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from gateway.accounting import AccountingQueue
 from gateway.auth import CallerResolver
 from gateway.breaker import BreakerSet, BreakerState
-from gateway.config import ConfigHolder, install_sighup_reload, load_config
+from gateway.config import ConfigHolder, install_sighup_reload
+from gateway.config_store import ConfigStore, ConfigStoreError
 from gateway.db import Database
 from gateway.metrics import (
     ACCOUNTING_DROPPED,
@@ -91,23 +92,14 @@ def _apply_env_overrides(
 async def lifespan(app: FastAPI):
     configure_logging(os.environ.get("GATEWAY_LOG_LEVEL", "INFO"))
 
-    config_path = os.environ.get("GATEWAY_CONFIG", "config.yaml")
-    cfg = load_config(config_path)
-    cfg = _apply_env_overrides(
-        cfg,
-        provider_mode=os.environ.get("GATEWAY_PROVIDER_MODE"),
-        secrets_mode=os.environ.get("GATEWAY_SECRETS_MODE"),
-    )
-    holder = ConfigHolder(cfg, source_path=config_path)
-    install_sighup_reload(holder)
-
     redis_url = os.environ.get("GATEWAY_REDIS_URL", "redis://localhost:6379/0")
 
     # #2.3: In real mode, GATEWAY_DB_DSN must be set explicitly — a missing
     # env var should fail loudly at startup rather than connecting to the dev
     # default (postgres://gateway:gateway@localhost) in a prod environment.
     db_dsn = os.environ.get("GATEWAY_DB_DSN", "")
-    if cfg.provider_mode == "real" and not db_dsn:
+    provider_mode_env = os.environ.get("GATEWAY_PROVIDER_MODE")
+    if provider_mode_env == "real" and not db_dsn:
         raise RuntimeError(
             "GATEWAY_DB_DSN must be set when provider_mode is 'real'. "
             "Refusing to start with an implicit default DSN in production."
@@ -115,10 +107,33 @@ async def lifespan(app: FastAPI):
     if not db_dsn:
         db_dsn = "postgres://gateway:gateway@localhost:5432/gateway"
 
-    # #5.4: In real mode, both transports should be TLS. We log a warning
-    # rather than fail so a deployment behind a TLS-terminating proxy on the
-    # same host can opt out, but anything fronting the public internet should
-    # use sslmode=require / rediss://.
+    r = redis_async.from_url(redis_url, decode_responses=False)
+    state = RedisState(r)
+    await state.load_scripts()
+    REDIS_DOWN.set(0)
+
+    db = Database(dsn=db_dsn)
+    await db.connect()
+
+    config_store = ConfigStore(db=db, redis_state=state)
+    try:
+        cfg = await config_store.load_or_refresh()
+    except ConfigStoreError as e:
+        raise RuntimeError(
+            f"gateway config missing from database: {e}; "
+            "run ./scripts/setup.sh to bootstrap"
+        ) from e
+
+    cfg = _apply_env_overrides(
+        cfg,
+        provider_mode=provider_mode_env,
+        secrets_mode=os.environ.get("GATEWAY_SECRETS_MODE"),
+    )
+
+    holder = ConfigHolder(cfg, config_store=config_store)
+    install_sighup_reload(holder)
+
+    # #5.4: In real mode, both transports should be TLS.
     if cfg.provider_mode == "real":
         if "sslmode=require" not in db_dsn and "sslmode=verify" not in db_dsn:
             log.warning(
@@ -130,14 +145,6 @@ async def lifespan(app: FastAPI):
                 "redis URL is not rediss:// in real mode; "
                 "set GATEWAY_REDIS_URL to a rediss:// endpoint"
             )
-
-    r = redis_async.from_url(redis_url, decode_responses=False)
-    state = RedisState(r)
-    await state.load_scripts()
-    REDIS_DOWN.set(0)
-
-    db = Database(dsn=db_dsn)
-    await db.connect()
 
     try:
         count = await db.pool.fetchval("SELECT COUNT(*) FROM callers")
@@ -172,7 +179,13 @@ async def lifespan(app: FastAPI):
 
     vendors = build_vendors(cfg, secrets)
 
-    bucket = RedisTokenBucket(state=state, limits=cfg.rate_limits)
+    # Build the rate-limits map for RedisTokenBucket from per-candidate entries.
+    _limits = {
+        f"{cand.provider}/{cand.model}": cand.rate_limits
+        for tier_cfg in cfg.tiers.values()
+        for cand in tier_cfg.candidates
+    }
+    bucket = RedisTokenBucket(state=state, limits=_limits)
     breakers = BreakerSet(state=state)
     observer = Observer(state=state, window_s=cfg.routing.health_window_s)
     engine = WeightEngine(routing=cfg.routing)
@@ -297,8 +310,8 @@ async def metrics(
 def _refresh_observability_gauges(request: Request) -> None:
     eng: WeightEngine = request.app.state.engine
     cfg = request.app.state.cfg.value
-    for tier_cands in cfg.tiers.values():
-        for t in tier_cands:
+    for tier_cfg in cfg.tiers.values():
+        for t in tier_cfg.candidates:
             ref = CandidateRef(provider=t.provider, model=t.model)
             sig = eng.signals_for(ref)
             if sig is None:

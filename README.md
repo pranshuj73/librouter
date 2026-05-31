@@ -18,11 +18,24 @@ The default compose runs **mock vendors** so no API keys are needed.
 
 ## First-time setup
 
-Before the gateway can serve any traffic, the database needs a schema and at
-least one caller row. These are one-time operations and live in `scripts/`,
-not in the application:
+Before the gateway can serve any traffic, the database needs a schema, gateway
+runtime config, and at least one caller row. These are one-time operations
+and live in `scripts/`, not in the application:
 
     ./scripts/setup.sh
+
+This runs:
+1. `scripts/apply_migrations.py` — applies every file in `migrations/*.sql`
+2. `scripts/seed_config.py` — seeds gateway runtime config (tiers, routing,
+   rate limits) from `scripts/data/config-seeding.yaml` into Postgres.
+   Edit that YAML file to change tiers or routing settings, then re-run this
+   script. There are no more `config.yaml` / `config.dev.yaml` files.
+3. `scripts/seed_callers.py` — upserts callers from `scripts/data/caller-seeding.json`
+   using plaintext keys from `GATEWAY_SEED_KEY_<NAME>` env vars
+
+The gateway itself never seeds config and never runs migrations. On startup it
+loads config from Postgres (cached in Redis for 60 s). A `SIGHUP` forces an
+immediate re-fetch from the database.
 
 ### Caller key pepper
 
@@ -39,16 +52,9 @@ code and the gateway refuses to start. If you rotate the pepper, every
 `scripts/seed_callers.py` with the new pepper to rebuild all hashes. There is
 no automatic migration path: pepper rotation is an explicit operator action.
 
-This runs:
-1. `scripts/apply_migrations.py` — applies every file in `migrations/*.sql`
-2. `scripts/seed_callers.py` — upserts callers from `scripts/data/caller-seeding.json`
-   using plaintext keys from `GATEWAY_SEED_KEY_<NAME>` env vars
-
 For dev, drop the dev key into `.env` (see `.env.example`):
 
     GATEWAY_SEED_KEY_DEV=dev-key-do-not-use-in-prod
-
-The gateway itself never seeds callers and never runs migrations.
 
 ## Using real providers
 

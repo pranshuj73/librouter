@@ -50,6 +50,9 @@ async def db(pg_dsn):
     await d.connect()
     # Clean tables if a previous test left them.
     async with d.pool.acquire() as c:
+        await c.execute("DROP TABLE IF EXISTS routing_config")
+        await c.execute("DROP TABLE IF EXISTS tier_models")
+        await c.execute("DROP TABLE IF EXISTS tiers")
         await c.execute("DROP TABLE IF EXISTS requests")
         await c.execute("DROP TABLE IF EXISTS callers")
     await d.run_migrations()
@@ -313,3 +316,105 @@ async def test_write_batch_persists_client_trace_id(db: Database):
         )
     assert row is not None
     assert row["client_trace_id"] == "trace-1"
+
+
+# ---------------------------------------------------------------- new config-table tests (0003)
+
+
+async def test_upsert_and_fetch_tier(db: Database):
+    """upsert_tier round-trips name and fallback_tier."""
+    await db.upsert_tier(name="fast", fallback_tier=None)
+    await db.upsert_tier(name="smart", fallback_tier=None)
+    tiers = await db.fetch_tiers()
+    names = {t["name"] for t in tiers}
+    assert "fast" in names
+    assert "smart" in names
+
+
+async def test_upsert_tier_is_idempotent(db: Database):
+    """Second upsert of same tier name does not raise and keeps latest values."""
+    await db.upsert_tier(name="fast", fallback_tier=None)
+    await db.upsert_tier(name="fast", fallback_tier=None)
+    tiers = await db.fetch_tiers()
+    fast_rows = [t for t in tiers if t["name"] == "fast"]
+    assert len(fast_rows) == 1
+
+
+async def test_upsert_and_fetch_tier_models(db: Database):
+    """upsert_tier_models stores JSONB and fetch_tier_models parses it back."""
+    config = {
+        "fast": {
+            "model": "gpt-4o-mini",
+            "weight": 50.0,
+            "rate_limits": {"rpm": 1000, "tpm": 100000},
+        }
+    }
+    await db.upsert_tier_models(provider="openai", config=config)
+    rows = await db.fetch_tier_models()
+    openai_row = next(r for r in rows if r["provider"] == "openai")
+    assert openai_row["config"]["fast"]["model"] == "gpt-4o-mini"
+    assert openai_row["config"]["fast"]["rate_limits"]["rpm"] == 1000
+
+
+async def test_upsert_tier_models_overwrites_on_conflict(db: Database):
+    """Second upsert replaces the config JSONB atomically."""
+    await db.upsert_tier_models(
+        provider="openai",
+        config={"fast": {"model": "gpt-4o-mini", "weight": 50.0,
+                          "rate_limits": {"rpm": 1000, "tpm": 100000}}}
+    )
+    await db.upsert_tier_models(
+        provider="openai",
+        config={"fast": {"model": "gpt-4o-updated", "weight": 70.0,
+                          "rate_limits": {"rpm": 2000, "tpm": 200000}}}
+    )
+    rows = await db.fetch_tier_models()
+    openai_row = next(r for r in rows if r["provider"] == "openai")
+    assert openai_row["config"]["fast"]["model"] == "gpt-4o-updated"
+
+
+async def test_fetch_routing_config_returns_none_when_empty(db: Database):
+    """fetch_routing_config returns None when table is empty."""
+    result = await db.fetch_routing_config()
+    assert result is None
+
+
+async def test_upsert_and_fetch_routing_config(db: Database):
+    """upsert_routing_config round-trips all fields."""
+    await db.upsert_routing_config(
+        refresh_interval_ms=500,
+        health_window_s=30,
+        target_latency_s=2.5,
+        min_weight_floor=0.01,
+        rng_seed_env="GATEWAY_RNG_SEED",
+    )
+    row = await db.fetch_routing_config()
+    assert row is not None
+    assert row["refresh_interval_ms"] == 500
+    assert row["health_window_s"] == 30
+    assert float(row["target_latency_s"]) == pytest.approx(2.5)
+    assert float(row["min_weight_floor"]) == pytest.approx(0.01)
+    assert row["rng_seed_env"] == "GATEWAY_RNG_SEED"
+
+
+async def test_upsert_routing_config_is_idempotent(db: Database):
+    """Second upsert of routing_config updates existing row."""
+    await db.upsert_routing_config(
+        refresh_interval_ms=1000,
+        health_window_s=60,
+        target_latency_s=3.0,
+        min_weight_floor=0.02,
+        rng_seed_env=None,
+    )
+    await db.upsert_routing_config(
+        refresh_interval_ms=2000,
+        health_window_s=120,
+        target_latency_s=4.0,
+        min_weight_floor=0.05,
+        rng_seed_env="MY_SEED",
+    )
+    row = await db.fetch_routing_config()
+    assert row is not None
+    assert row["refresh_interval_ms"] == 2000
+    assert row["health_window_s"] == 120
+    assert row["rng_seed_env"] == "MY_SEED"

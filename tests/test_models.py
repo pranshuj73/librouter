@@ -29,10 +29,10 @@ from gateway.models import (
     Config,
     ErrorBody,
     Message,
-    PriceEntry,
     ProviderErrorKind,
     RateLimitEntry,
     RoutingConfig,
+    TierConfig,
     TierEntry,
     Usage,
 )
@@ -46,24 +46,20 @@ def _valid_config_dict() -> dict:
         "provider_mode": "mock",
         "secrets_mode": "mock",
         "tiers": {
-            "fast": [
-                {"provider": "anthropic", "model": "haiku", "weight": 50},
-                {"provider": "openai", "model": "gpt-mini", "weight": 50},
-            ],
+            "fast": {
+                "candidates": [
+                    {"provider": "anthropic", "model": "haiku", "weight": 50,
+                     "rate_limits": {"rpm": 1000, "tpm": 100000}},
+                    {"provider": "openai", "model": "gpt-mini", "weight": 50,
+                     "rate_limits": {"rpm": 1000, "tpm": 100000}},
+                ],
+            },
         },
         "routing": {
             "refresh_interval_ms": 1000,
             "health_window_s": 60,
             "target_latency_s": 3.0,
             "min_weight_floor": 0.02,
-        },
-        "prices": {
-            "anthropic/haiku": {"input": 1.0, "output": 5.0},
-            "openai/gpt-mini": {"input": 0.15, "output": 0.6},
-        },
-        "rate_limits": {
-            "anthropic/haiku": {"rpm": 1000, "tpm": 100000},
-            "openai/gpt-mini": {"rpm": 1000, "tpm": 100000},
         },
         "callers": [
             {"name": "svc-a", "key_hash": "sha256:abc", "daily_token_cap": 1000000},
@@ -76,43 +72,28 @@ def test_config_round_trip():
     assert cfg.provider_mode == "mock"
     assert cfg.secrets_mode == "mock"
     assert "fast" in cfg.tiers
-    assert cfg.tiers["fast"][0].weight == 50
+    assert cfg.tiers["fast"].candidates[0].weight == 50
     assert cfg.routing.refresh_interval_ms == 1000
-    assert cfg.prices["anthropic/haiku"].input == 1.0
     assert cfg.callers[0].name == "svc-a"
 
 
 def test_config_rejects_negative_weight():
     d = _valid_config_dict()
-    d["tiers"]["fast"][0]["weight"] = -1
+    d["tiers"]["fast"]["candidates"][0]["weight"] = -1
     with pytest.raises(ValidationError):
         Config.model_validate(d)
-
-
-def test_config_rejects_negative_price():
-    d = _valid_config_dict()
-    d["prices"]["anthropic/haiku"]["input"] = -0.1
-    with pytest.raises(ValidationError):
-        Config.model_validate(d)
-
-
-def test_config_rejects_tier_candidate_missing_price():
-    d = _valid_config_dict()
-    d["tiers"]["fast"].append({"provider": "google", "model": "gemini", "weight": 25})
-    # google/gemini has no price entry -> should fail cross-validation
-    with pytest.raises(ValidationError) as exc:
-        Config.model_validate(d)
-    assert "price" in str(exc.value).lower()
 
 
 def test_config_rejects_tier_candidate_missing_rate_limit():
     d = _valid_config_dict()
-    d["prices"]["google/gemini"] = {"input": 1.0, "output": 2.0}
-    d["tiers"]["fast"].append({"provider": "google", "model": "gemini", "weight": 25})
-    # rate_limits missing -> should fail
+    # Add a candidate without rate_limits — Pydantic must reject it.
+    d["tiers"]["fast"]["candidates"].append(
+        {"provider": "google", "model": "gemini", "weight": 25}
+        # no rate_limits key
+    )
     with pytest.raises(ValidationError) as exc:
         Config.model_validate(d)
-    assert "rate" in str(exc.value).lower()
+    assert "rate_limits" in str(exc.value).lower()
 
 
 def test_config_rejects_unknown_provider_mode():
@@ -128,15 +109,15 @@ def test_caller_entry_requires_key_hash():
 
 
 def test_tier_entry_validates_weight_non_negative():
-    TierEntry(provider="openai", model="gpt-4o", weight=0)
+    TierEntry(
+        provider="openai", model="gpt-4o", weight=0,
+        rate_limits=RateLimitEntry(rpm=100, tpm=10000)
+    )
     with pytest.raises(ValidationError):
-        TierEntry(provider="openai", model="gpt-4o", weight=-1)
-
-
-def test_price_entry_validates_non_negative():
-    PriceEntry(input=0.0, output=0.0)
-    with pytest.raises(ValidationError):
-        PriceEntry(input=-0.01, output=1.0)
+        TierEntry(
+            provider="openai", model="gpt-4o", weight=-1,
+            rate_limits=RateLimitEntry(rpm=100, tpm=10000)
+        )
 
 
 def test_rate_limit_entry_validates_positive():
@@ -620,7 +601,6 @@ def test_empty_tiers_dict_currently_accepted():
     """
     d = _valid_config_dict()
     d["tiers"] = {}
-    # Today this validates: the cross-validator just iterates an empty dict.
     cfg = Config.model_validate(d)
     assert cfg.tiers == {}
 
@@ -629,13 +609,9 @@ def test_empty_tiers_dict_currently_accepted():
 
 
 def test_provider_real_with_secrets_mock_currently_accepted():
-    """`provider_mode='real'` with `secrets_mode='mock'` is currently allowed.
+    """`provider_mode='real'` with `secrets_mode='mock'` is currently allowed at model level.
 
-    This combination is almost certainly a misconfiguration in production
-    (real vendor calls with no real API keys), but `gateway/models.py`
-    has no model-level validator that forbids it. The gate is documented
-    contract, not schema. Pinned here so an accidental schema change
-    elsewhere doesn't silently shift the contract.
+    The gate is applied in app.py lifespan, not in the schema.
     """
     d = _valid_config_dict()
     d["provider_mode"] = "real"

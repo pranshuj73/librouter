@@ -22,23 +22,18 @@ def _cfg(mode: str) -> Config:
             "provider_mode": mode,
             "secrets_mode": "mock",
             "tiers": {
-                "fast": [
-                    {"provider": "openai", "model": "gpt-mini", "weight": 50},
-                    {"provider": "anthropic", "model": "haiku", "weight": 30},
-                    {"provider": "google", "model": "flash", "weight": 20},
-                ],
+                "fast": {
+                    "candidates": [
+                        {"provider": "openai", "model": "gpt-4o-mini", "weight": 50,
+                         "rate_limits": {"rpm": 100, "tpm": 10000}},
+                        {"provider": "anthropic", "model": "claude-haiku-4-5", "weight": 30,
+                         "rate_limits": {"rpm": 100, "tpm": 10000}},
+                        {"provider": "google", "model": "gemini-2.5-flash", "weight": 20,
+                         "rate_limits": {"rpm": 100, "tpm": 10000}},
+                    ],
+                },
             },
             "routing": {},
-            "prices": {
-                "openai/gpt-mini": {"input": 0.15, "output": 0.6},
-                "anthropic/haiku": {"input": 1.0, "output": 5.0},
-                "google/flash": {"input": 0.3, "output": 2.5},
-            },
-            "rate_limits": {
-                "openai/gpt-mini": {"rpm": 100, "tpm": 10000},
-                "anthropic/haiku": {"rpm": 100, "tpm": 10000},
-                "google/flash": {"rpm": 100, "tpm": 10000},
-            },
             "callers": [{"name": "t", "key_hash": "sha256:x"}],
         }
     )

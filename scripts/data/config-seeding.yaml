@@ -1,0 +1,47 @@
+# Bootstrap copy of gateway runtime config (formerly config.dev.yaml).
+# Seeded into Postgres by scripts/seed_config.py.
+# provider_mode and secrets_mode are overridden at runtime via env vars
+# GATEWAY_PROVIDER_MODE and GATEWAY_SECRETS_MODE; the values below are
+# the defaults applied when no env override is set.
+
+provider_mode: mock
+secrets_mode: mock
+
+tiers:
+  fast:
+    candidates:
+      - provider: anthropic
+        model: claude-haiku-4-5
+        weight: 50
+        rate_limits: {rpm: 1000, tpm: 100000}
+      - provider: openai
+        model: gpt-4o-mini
+        weight: 30
+        rate_limits: {rpm: 1000, tpm: 100000}
+      - provider: google
+        model: gemini-2.5-flash
+        weight: 20
+        rate_limits: {rpm: 1000, tpm: 100000}
+  smart:
+    candidates:
+      - provider: anthropic
+        model: claude-sonnet-4-6
+        weight: 40
+        rate_limits: {rpm: 500, tpm: 50000}
+      - provider: openai
+        model: gpt-4o
+        weight: 40
+        rate_limits: {rpm: 500, tpm: 50000}
+      - provider: google
+        model: gemini-2.5-pro
+        weight: 20
+        rate_limits: {rpm: 500, tpm: 50000}
+
+routing:
+  refresh_interval_ms: 1000
+  health_window_s: 60
+  target_latency_s: 3.0
+  min_weight_floor: 0.02
+  rng_seed_env: GATEWAY_RNG_SEED
+
+callers: []
