@@ -15,8 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ./gateway /code/gateway
 COPY ./migrations /code/migrations
-COPY ./config.yaml /code/config.yaml
-COPY ./config.dev.yaml /code/config.dev.yaml
+COPY ./scripts /code/scripts
 
 RUN useradd --system --uid 10001 --no-create-home gateway \
  && chown -R gateway:gateway /code
