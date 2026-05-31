@@ -95,13 +95,25 @@ class BreakerSet:
 
     async def refresh_snapshot(self) -> None:
         """Aggregate the last `window_s` seconds of samples for every breaker
-        currently in use and update local state."""
+        currently in use and update local state.
+
+        #6.1: Build a fresh dict then atomically swap self._snapshot at the
+        end.  No lock needed — the swap itself is a single Python assignment
+        (atomic at the interpreter level) and avoids torn reads from
+        concurrent async paths that may observe a partially-mutated dict.
+        """
         now = self._now_s()
         await self._seed_snapshot_from_keys()
         keys_in_window = self._enumerate_sample_keys(now)
+
+        # Start from a copy of the current snapshot so existing state is
+        # preserved for candidates not seen in this refresh cycle.
+        new_snapshot: dict[tuple[str, str], _SnapshotEntry] = dict(self._snapshot)
+
         if not keys_in_window:
             # No samples but we may still need to transition open->half_open
-            self._transition_after_window(now)
+            self._transition_after_window_into(new_snapshot, now)
+            self._snapshot = new_snapshot
             return
 
         r = self._state.client
@@ -139,9 +151,11 @@ class BreakerSet:
             new_entry = self._compute_next_state(
                 entry, total, failures, now, post_half_open
             )
-            self._snapshot[cand] = new_entry
+            new_snapshot[cand] = new_entry
 
-        self._transition_after_window(now)
+        self._transition_after_window_into(new_snapshot, now)
+        # Atomic swap — readers see either the old complete dict or the new one.
+        self._snapshot = new_snapshot
 
     def _enumerate_sample_keys(self, now: float) -> list[tuple[tuple[str, str], str]]:
         """List sample keys per (provider, model) that we've ever recorded."""
@@ -255,13 +269,16 @@ class BreakerSet:
             failures=failures,
         )
 
-    def _transition_after_window(self, now: float) -> None:
-        for cand, entry in list(self._snapshot.items()):
+    def _transition_after_window_into(
+        self, snapshot: dict[tuple[str, str], _SnapshotEntry], now: float
+    ) -> None:
+        """Mutate *snapshot* in-place: OPEN -> HALF_OPEN after open_duration_s."""
+        for cand, entry in list(snapshot.items()):
             if (
                 entry.state is BreakerState.OPEN
                 and now - entry.opened_at_s >= self._open_duration_s
             ):
-                self._snapshot[cand] = _SnapshotEntry(
+                snapshot[cand] = _SnapshotEntry(
                     state=BreakerState.HALF_OPEN,
                     opened_at_s=entry.opened_at_s,
                     samples=entry.samples,

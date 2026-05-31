@@ -17,6 +17,7 @@ import logging
 from collections import deque
 from typing import Protocol
 
+from gateway.metrics import ACCOUNTING_DROPPED
 from gateway.models import AttemptRecord
 
 
@@ -103,4 +104,8 @@ class AccountingQueue:
             await self._writer.write_batch(batch)
         except Exception:
             log.exception("accounting write_batch failed; %d rows dropped", len(batch))
-            self._dropped_total += len(batch)
+            n = len(batch)
+            self._dropped_total += n
+            # #6.3: Increment the live Prometheus gauge so operators see drops
+            # immediately rather than only at shutdown.
+            ACCOUNTING_DROPPED.inc(n)
