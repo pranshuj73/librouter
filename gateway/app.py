@@ -123,8 +123,9 @@ async def lifespan(app: FastAPI):
     refresh.start()
 
     rng_seed_env = cfg.routing.rng_seed_env
-    if rng_seed_env and rng_seed_env in os.environ:
-        rng = random.Random(int(os.environ[rng_seed_env]))
+    rng_seed_raw = os.environ.get(rng_seed_env or "", "").strip()
+    if rng_seed_raw:
+        rng = random.Random(int(rng_seed_raw))
     else:
         rng = random.SystemRandom()
 

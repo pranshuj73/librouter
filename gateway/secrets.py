@@ -27,16 +27,21 @@ class SecretsManager(ABC):
 
 
 class EnvSecretsManager(SecretsManager):
-    """Reads from `os.environ` at call time so late-bound env vars are seen."""
+    """Reads from `os.environ` at call time so late-bound env vars are seen.
+
+    An env var set to the empty string is treated as *absent* — `${FOO:-}`
+    style substitutions (notably docker-compose) materialize unset variables
+    as empty strings, and an empty API key is never a usable secret.
+    """
 
     def get(self, key: str) -> str:
-        try:
-            return os.environ[key]
-        except KeyError as e:
-            raise KeyError(f"secret {key!r} not set in environment") from e
+        value = os.environ.get(key, "")
+        if not value:
+            raise KeyError(f"secret {key!r} not set in environment")
+        return value
 
     def has(self, key: str) -> bool:
-        return key in os.environ
+        return bool(os.environ.get(key, ""))
 
 
 class MockSecretsManager(SecretsManager):

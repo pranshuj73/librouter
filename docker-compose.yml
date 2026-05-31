@@ -39,7 +39,18 @@ services:
     environment:
       GATEWAY_DB_DSN: postgres://gateway:gateway@postgres:5432/gateway
       GATEWAY_REDIS_URL: redis://redis:6379/0
-      GATEWAY_CONFIG: /code/config.dev.yaml
-      GATEWAY_PROVIDER_MODE: mock
-      GATEWAY_SECRETS_MODE: mock
+      # `.env` (gitignored) overrides any of the below via ${VAR:-default}.
+      # See .env.example for the keys we read.
+      GATEWAY_CONFIG: ${GATEWAY_CONFIG:-/code/config.dev.yaml}
+      GATEWAY_PROVIDER_MODE: ${GATEWAY_PROVIDER_MODE:-mock}
+      GATEWAY_SECRETS_MODE: ${GATEWAY_SECRETS_MODE:-mock}
+      GATEWAY_LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-INFO}
+      GATEWAY_RNG_SEED: ${GATEWAY_RNG_SEED:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    volumes:
+      # Bind-mount configs so edits land without rebuilding the image.
+      - ./config.yaml:/code/config.yaml:ro
+      - ./config.dev.yaml:/code/config.dev.yaml:ro
     ports: ["8000:8000"]
