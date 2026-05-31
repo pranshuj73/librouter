@@ -8,8 +8,9 @@ data models) belong in their own modules.
 
 from __future__ import annotations
 
+import re
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
@@ -21,6 +22,13 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+# ---------------------------------------------------------------- Constants
+
+_CALLER_NAME_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
+
+# Annotated type reused across CallerEntry, Caller, and AttemptRecord.caller
+CallerName = Annotated[str, Field(pattern=r"^[a-z0-9_-]{1,64}$")]
 
 
 # ---------------------------------------------------------------- Enums
@@ -69,7 +77,7 @@ class RateLimitEntry(BaseModel):
 class CallerEntry(BaseModel):
     """One internal backend authorized to call the gateway."""
 
-    name: str
+    name: CallerName
     key_hash: str
     daily_token_cap: NonNegativeInt | None = None
     enabled: bool = True
@@ -120,7 +128,7 @@ Role = Literal["system", "user", "assistant", "tool"]
 
 class Message(BaseModel):
     role: Role
-    content: str
+    content: str = Field(max_length=200_000)
 
 
 class Usage(BaseModel):
@@ -139,8 +147,8 @@ class ChatCompletionRequest(BaseModel):
     """OpenAI-shaped request. `model` is a logical tier name (e.g. 'fast')."""
 
     model: str
-    messages: list[Message] = Field(min_length=1)
-    max_tokens: PositiveInt = 1024
+    messages: list[Message] = Field(min_length=1, max_length=512)
+    max_tokens: int = Field(default=1024, gt=0, le=16384)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     stream: bool = False
@@ -152,6 +160,37 @@ class ChatCompletionRequest(BaseModel):
         if v:
             raise ValueError("stream=true is not supported in v1 (non-streaming only)")
         return v
+
+    @field_validator("metadata")
+    @classmethod
+    def _validate_metadata_bounds(
+        cls, v: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        if v is None:
+            return v
+        if len(v) > 16:
+            raise ValueError(
+                f"metadata may have at most 16 entries, got {len(v)}"
+            )
+        for key, value in v.items():
+            if len(key) > 64:
+                raise ValueError(
+                    f"metadata key {key!r} exceeds 64-character limit"
+                )
+            if len(value) > 256:
+                raise ValueError(
+                    f"metadata value for key {key!r} exceeds 256-character limit"
+                )
+        return v
+
+    @model_validator(mode="after")
+    def _validate_aggregate_content_size(self) -> "ChatCompletionRequest":
+        total = sum(len(m.content) for m in self.messages)
+        if total >= 1_000_000:
+            raise ValueError(
+                f"aggregate message content size {total} exceeds 1,000,000 characters"
+            )
+        return self
 
 
 class ChatCompletionResponse(BaseModel):
@@ -205,7 +244,7 @@ class AttemptRecord(BaseModel):
     """One row in the requests table — every attempt is recorded, not just the winner."""
 
     request_id: str
-    caller: str
+    caller: CallerName
     tier: str
     provider: str
     model: str
@@ -221,6 +260,6 @@ class AttemptRecord(BaseModel):
 class Caller(BaseModel):
     """Identity + policy for an internal caller, hydrated from config + DB."""
 
-    name: str
+    name: CallerName
     daily_token_cap: NonNegativeInt | None = None
     enabled: bool = True

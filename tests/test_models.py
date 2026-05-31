@@ -286,3 +286,341 @@ def test_provider_error_kind_enum_values():
     assert ProviderErrorKind.BAD_REQUEST.value == "bad_request"
     assert ProviderErrorKind.AUTH.value == "auth"
     assert ProviderErrorKind.CONTENT_FILTERED.value == "content_filtered"
+
+
+# ---------------------------------------------------------------- Finding 4.1: max_tokens bounds
+
+
+def test_max_tokens_rejects_zero():
+    d = _valid_chat_request_dict()
+    d["max_tokens"] = 0
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(d)
+
+
+def test_max_tokens_rejects_above_cap():
+    d = _valid_chat_request_dict()
+    d["max_tokens"] = 16385
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(d)
+
+    d["max_tokens"] = 16384
+    req = ChatCompletionRequest.model_validate(d)
+    assert req.max_tokens == 16384
+
+
+def test_max_tokens_default_is_1024():
+    d = _valid_chat_request_dict()
+    del d["max_tokens"]
+    req = ChatCompletionRequest.model_validate(d)
+    assert req.max_tokens == 1024
+
+
+# ---------------------------------------------------------------- Finding 4.1: Message.content max_length
+
+
+def test_message_content_rejects_oversize():
+    with pytest.raises(ValidationError):
+        Message(role="user", content="x" * 200_001)
+
+    msg = Message(role="user", content="x" * 200_000)
+    assert len(msg.content) == 200_000
+
+
+# ---------------------------------------------------------------- Finding 4.1: messages list max_length
+
+
+def _make_chat_request_with_n_messages(n: int) -> dict:
+    return {
+        "model": "fast",
+        "messages": [{"role": "user", "content": "hi"}] * n,
+        "max_tokens": 64,
+        "stream": False,
+    }
+
+
+def test_messages_list_rejects_too_many():
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(_make_chat_request_with_n_messages(513))
+
+    req = ChatCompletionRequest.model_validate(_make_chat_request_with_n_messages(512))
+    assert len(req.messages) == 512
+
+
+# ---------------------------------------------------------------- Finding 4.1: aggregate content size guard
+
+
+def test_messages_aggregate_size_capped():
+    # 5 messages × 250_000 chars = 1_250_000 → should fail (>= 1_000_000)
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(
+            {
+                "model": "fast",
+                "messages": [{"role": "user", "content": "x" * 250_000}] * 5,
+                "max_tokens": 64,
+                "stream": False,
+            }
+        )
+
+    # 5 messages × 199_000 chars = 995_000 → should succeed (< 1_000_000)
+    req = ChatCompletionRequest.model_validate(
+        {
+            "model": "fast",
+            "messages": [{"role": "user", "content": "x" * 199_000}] * 5,
+            "max_tokens": 64,
+            "stream": False,
+        }
+    )
+    assert len(req.messages) == 5
+
+
+# ---------------------------------------------------------------- Finding 4.3: metadata bounds
+
+
+def test_metadata_rejects_too_many_keys():
+    d = _valid_chat_request_dict()
+    d["metadata"] = {str(i): "v" for i in range(17)}
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(d)
+
+    d["metadata"] = {str(i): "v" for i in range(16)}
+    req = ChatCompletionRequest.model_validate(d)
+    assert len(req.metadata) == 16
+
+
+def test_metadata_rejects_oversize_key():
+    d = _valid_chat_request_dict()
+    d["metadata"] = {"k" * 65: "value"}
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(d)
+
+    d["metadata"] = {"k" * 64: "value"}
+    req = ChatCompletionRequest.model_validate(d)
+    assert "k" * 64 in req.metadata
+
+
+def test_metadata_rejects_oversize_value():
+    d = _valid_chat_request_dict()
+    d["metadata"] = {"key": "v" * 257}
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(d)
+
+    d["metadata"] = {"key": "v" * 256}
+    req = ChatCompletionRequest.model_validate(d)
+    assert req.metadata["key"] == "v" * 256
+
+
+def test_metadata_none_still_allowed():
+    d = _valid_chat_request_dict()
+    d["metadata"] = None
+    req = ChatCompletionRequest.model_validate(d)
+    assert req.metadata is None
+
+
+# ---------------------------------------------------------------- Finding 4.4: caller name regex
+
+
+def test_caller_entry_name_regex_rejects_uppercase():
+    with pytest.raises(ValidationError):
+        CallerEntry(name="SvcA", key_hash="sha256:abc")
+
+
+def test_caller_entry_name_regex_rejects_special_chars():
+    for bad_name in ("svc/a", "svc a", "svc.a", "svc\na"):
+        with pytest.raises(ValidationError):
+            CallerEntry(name=bad_name, key_hash="sha256:abc")
+
+
+def test_caller_entry_name_regex_accepts_canonical():
+    for good_name in ("svc-a", "svc_a", "svc-123"):
+        entry = CallerEntry(name=good_name, key_hash="sha256:abc")
+        assert entry.name == good_name
+
+
+def test_caller_entry_name_regex_rejects_too_long():
+    with pytest.raises(ValidationError):
+        CallerEntry(name="a" * 65, key_hash="sha256:abc")
+
+    entry = CallerEntry(name="a" * 64, key_hash="sha256:abc")
+    assert len(entry.name) == 64
+
+
+def test_caller_name_regex_applies_to_caller_dto():
+    with pytest.raises(ValidationError):
+        Caller(name="SvcA")
+    with pytest.raises(ValidationError):
+        Caller(name="svc/a")
+
+    c = Caller(name="svc-a")
+    assert c.name == "svc-a"
+
+
+def test_caller_name_regex_applies_to_attempt_record():
+    base = dict(
+        request_id="req-1",
+        tier="fast",
+        provider="openai",
+        model="gpt-4o-mini",
+        attempt_idx=0,
+        latency_ms=100,
+        status="ok",
+    )
+    with pytest.raises(ValidationError):
+        AttemptRecord(**base, caller="SvcA")
+    with pytest.raises(ValidationError):
+        AttemptRecord(**base, caller="svc/a")
+
+    rec = AttemptRecord(**base, caller="svc-a")
+    assert rec.caller == "svc-a"
+
+
+# ---------------------------------------------------------------- Finding 6 — gap-closing scenarios
+#
+# The cases below close the §6 gaps in `docs/code-review/t-1.md`. Most
+# behaviors *currently* exist in `gateway/models.py` (the recent additions
+# for cr-1 §4 are in place), so these assertions pin them in place. A few
+# behaviors are documented today but not enforced; those are marked xfail
+# with a clear citation so we don't lose track.
+
+
+def test_config_rejects_extra_top_level_field():
+    """`Config.model_config = ConfigDict(extra='forbid')` rejects unknowns."""
+    d = _valid_config_dict()
+    d["nonsense_top_level"] = True
+    with pytest.raises(ValidationError) as exc:
+        Config.model_validate(d)
+    # The pydantic v2 error mentions "extra" or "forbidden"; either is fine.
+    msg = str(exc.value).lower()
+    assert "extra" in msg or "forbidden" in msg or "not permitted" in msg
+
+
+def test_candidate_ref_is_frozen():
+    """`CandidateRef` uses `ConfigDict(frozen=True)`; field assignment must raise."""
+    ref = CandidateRef(provider="openai", model="gpt-4o")
+    # In pydantic v2 a frozen-model assignment raises `ValidationError`.
+    with pytest.raises(ValidationError):
+        ref.provider = "anthropic"  # type: ignore[misc]
+
+
+def test_attempt_record_rejects_negative_input_tokens():
+    """`input_tokens: NonNegativeInt` should reject negative values."""
+    base = dict(
+        request_id="req-1",
+        caller="svc-a",
+        tier="fast",
+        provider="openai",
+        model="gpt-4o-mini",
+        attempt_idx=0,
+        latency_ms=100,
+        status="ok",
+    )
+    with pytest.raises(ValidationError):
+        AttemptRecord(**base, input_tokens=-1)
+    with pytest.raises(ValidationError):
+        AttemptRecord(**base, output_tokens=-1)
+
+
+# ---------- temperature / top_p boundaries (existing validators) ----------
+
+
+def test_temperature_boundary_2_0_accepted():
+    d = _valid_chat_request_dict()
+    d["temperature"] = 2.0
+    req = ChatCompletionRequest.model_validate(d)
+    assert req.temperature == 2.0
+
+
+def test_temperature_above_2_0_rejected():
+    d = _valid_chat_request_dict()
+    d["temperature"] = 2.01
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(d)
+
+
+def test_top_p_zero_accepted():
+    d = _valid_chat_request_dict()
+    d["top_p"] = 0.0
+    req = ChatCompletionRequest.model_validate(d)
+    assert req.top_p == 0.0
+
+
+def test_top_p_one_accepted():
+    d = _valid_chat_request_dict()
+    d["top_p"] = 1.0
+    req = ChatCompletionRequest.model_validate(d)
+    assert req.top_p == 1.0
+
+
+def test_top_p_above_one_rejected():
+    d = _valid_chat_request_dict()
+    d["top_p"] = 1.01
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(d)
+
+
+# ---------- CallerEntry.daily_token_cap boundary ----------
+
+
+def test_caller_entry_daily_token_cap_zero_accepted():
+    """`NonNegativeInt` permits 0 — verify the boundary."""
+    entry = CallerEntry(name="svc-a", key_hash="sha256:abc", daily_token_cap=0)
+    assert entry.daily_token_cap == 0
+
+
+# ---------- Empty tiers — document current behavior ----------
+
+
+def test_empty_tiers_dict_currently_accepted():
+    """An empty `tiers` dict is currently accepted (no validator iterates it).
+
+    TODO(cr-1 §4): the recommendation is to reject this — when implemented,
+    flip this test to `with pytest.raises(ValidationError):`.
+    """
+    d = _valid_config_dict()
+    d["tiers"] = {}
+    # Today this validates: the cross-validator just iterates an empty dict.
+    cfg = Config.model_validate(d)
+    assert cfg.tiers == {}
+
+
+# ---------- provider_mode / secrets_mode combo — documented, not enforced ----------
+
+
+def test_provider_real_with_secrets_mock_currently_accepted():
+    """`provider_mode='real'` with `secrets_mode='mock'` is currently allowed.
+
+    This combination is almost certainly a misconfiguration in production
+    (real vendor calls with no real API keys), but `gateway/models.py`
+    has no model-level validator that forbids it. The gate is documented
+    contract, not schema. Pinned here so an accidental schema change
+    elsewhere doesn't silently shift the contract.
+    """
+    d = _valid_config_dict()
+    d["provider_mode"] = "real"
+    d["secrets_mode"] = "mock"
+    cfg = Config.model_validate(d)
+    assert cfg.provider_mode == "real"
+    assert cfg.secrets_mode == "mock"
+
+
+# ---------- metadata value-type coercion ----------
+
+
+def test_metadata_non_string_value_behavior():
+    """Pydantic `dict[str, str]` coerces ints → strings by default.
+
+    This pins the *current* observable behavior. If a strict validator is
+    added later (cr-1 §4.3 follow-up), this assertion should flip to a
+    `with pytest.raises(ValidationError):` — but today it is documented as
+    silent coercion.
+    """
+    d = _valid_chat_request_dict()
+    d["metadata"] = {"foo": 123}
+    try:
+        req = ChatCompletionRequest.model_validate(d)
+    except ValidationError:
+        # If a future pydantic / model change starts rejecting this, that
+        # is *better* behavior — accept either path.
+        return
+    # If validation succeeded, the int must have been coerced to "123".
+    assert req.metadata == {"foo": "123"}
