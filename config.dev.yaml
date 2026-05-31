@@ -38,7 +38,7 @@ rate_limits:
   google/gemini-2.5-pro:       { rpm: 500,  tpm: 50000 }
 
 callers:
-  # Dev caller. Key: "dev-key-do-not-use-in-prod" — sha256 below.
+  # Dev caller. Key: "dev-key-do-not-use-in-prod"
   - name: dev
-    key_hash: "sha256:e94b4f3f8d4b6c1a9bdf36bdbb3a14e8e5f3c8e4b8f5e9b7a3c1d2e6f8a9b0c1"
+    key_hash: "sha256:ee6817dd35cc5568f1182c9bdaf430580f0b7ce8d44939244c4014bba01f9296"
     daily_token_cap: 1000000

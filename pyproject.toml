@@ -26,11 +26,12 @@ dev = [
     "respx==0.21.1",
     "freezegun==1.5.1",
     "testcontainers[redis,postgres]==4.9.0",
-    "fakeredis==2.26.2",
+    "fakeredis[lua]==2.26.2",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 filterwarnings = [
     "ignore::DeprecationWarning",
