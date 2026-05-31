@@ -43,6 +43,7 @@ from gateway.models import (
     ProviderErrorKind,
     Usage,
 )
+from gateway.pricing import PricingTable, load_pricing
 from gateway.providers.base import Vendor
 from gateway.ratelimit import RedisTokenBucket, estimate_tokens
 from gateway.routing.observe import Observer
@@ -103,6 +104,7 @@ class Router:
         total_budget_s: float = 10.0,
         per_attempt_max_s: float = 8.0,
         deadline_buffer_s: float = 0.5,
+        pricing: PricingTable | None = None,
     ) -> None:
         self._cfg = config
         self._vendors = vendors
@@ -114,6 +116,7 @@ class Router:
         self._total_budget_s = total_budget_s
         self._per_attempt_max_s = per_attempt_max_s
         self._buffer_s = deadline_buffer_s
+        self._pricing: PricingTable = pricing if pricing is not None else load_pricing()
 
     # ---------------------------------------------------------------- main
 
@@ -282,13 +285,12 @@ class Router:
         vendor_req_id: str | None = None,
         client_trace_id: str | None = None,
     ) -> AttemptRecord:
-        price = self._cfg.prices.get(cand.key())
-        if price is None:
-            cost = 0.0
-        else:
-            cost = (
-                input_tokens * price.input + output_tokens * price.output
-            ) / 1_000_000
+        cost = self._pricing.cost_usd(
+            provider=cand.provider,
+            model=cand.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
         return AttemptRecord(
             request_id=request_id,
             caller=caller,

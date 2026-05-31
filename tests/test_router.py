@@ -55,8 +55,8 @@ def _config() -> Config:
             "tiers": {
                 "fast": [
                     {"provider": "openai", "model": "gpt-4o-mini", "weight": 33.0},
-                    {"provider": "anthropic", "model": "haiku", "weight": 33.0},
-                    {"provider": "google", "model": "gemini-flash", "weight": 33.0},
+                    {"provider": "anthropic", "model": "claude-haiku-4-5", "weight": 33.0},
+                    {"provider": "google", "model": "gemini-2.5-flash", "weight": 33.0},
                 ],
             },
             "routing": {
@@ -67,13 +67,13 @@ def _config() -> Config:
             },
             "prices": {
                 "openai/gpt-4o-mini": {"input": 0.15, "output": 0.6},
-                "anthropic/haiku": {"input": 1.0, "output": 5.0},
-                "google/gemini-flash": {"input": 0.3, "output": 2.5},
+                "anthropic/claude-haiku-4-5": {"input": 1.0, "output": 5.0},
+                "google/gemini-2.5-flash": {"input": 0.3, "output": 2.5},
             },
             "rate_limits": {
                 "openai/gpt-4o-mini": {"rpm": 1000, "tpm": 100_000},
-                "anthropic/haiku": {"rpm": 1000, "tpm": 100_000},
-                "google/gemini-flash": {"rpm": 1000, "tpm": 100_000},
+                "anthropic/claude-haiku-4-5": {"rpm": 1000, "tpm": 100_000},
+                "google/gemini-2.5-flash": {"rpm": 1000, "tpm": 100_000},
             },
             "callers": [
                 {"name": "test", "key_hash": "sha256:abc", "daily_token_cap": 1_000_000}
@@ -398,8 +398,8 @@ async def test_empty_bucket_causes_repick(harness):
     rb = harness.rb
     # Drain anthropic RPM completely
     cfg = harness.cfg
-    for _ in range(cfg.rate_limits["anthropic/haiku"].rpm + 1):
-        await rb.try_acquire("anthropic", "haiku", request_tokens=1)
+    for _ in range(cfg.rate_limits["anthropic/claude-haiku-4-5"].rpm + 1):
+        await rb.try_acquire("anthropic", "claude-haiku-4-5", request_tokens=1)
     # Now route many times; if anthropic ever gets first-picked, the bucket
     # acquire will fail and the router repicks. Result must still be ok AND
     # never resolve to anthropic.
@@ -460,8 +460,8 @@ async def test_vendor_missing_skips_candidate(redis):
     # resulting RouterError. Drain openai and anthropic.
     for _ in range(cfg.rate_limits["openai/gpt-4o-mini"].rpm + 1):
         await rb.try_acquire("openai", "gpt-4o-mini", request_tokens=1)
-    for _ in range(cfg.rate_limits["anthropic/haiku"].rpm + 1):
-        await rb.try_acquire("anthropic", "haiku", request_tokens=1)
+    for _ in range(cfg.rate_limits["anthropic/claude-haiku-4-5"].rpm + 1):
+        await rb.try_acquire("anthropic", "claude-haiku-4-5", request_tokens=1)
 
     with pytest.raises(RouterError) as exc:
         await router.route(_req(), _caller())
@@ -476,29 +476,95 @@ async def test_vendor_missing_skips_candidate(redis):
 # ---------------------------------------------------------------- pricing / id-flow
 
 
-async def test_cost_is_zero_when_price_missing(harness):
-    """If a candidate has no price entry, ``router._record`` sets cost_usd=0.0.
+async def test_cost_usd_matches_pricing_table(harness):
+    """cost_usd on the successful attempt equals the PricingTable value.
 
-    We bypass the ``_cross_validate_candidates_have_pricing_and_limits``
-    validator by mutating ``router._cfg.prices`` after construction. We
-    queue errors on the priced vendors so the router falls through to the
-    unpriced winner.
+    With seed 123 the RNG picks openai/gpt-4o-mini first. We verify the
+    router cost matches what load_pricing() computes directly.
     """
+    import math
+    from gateway.pricing import load_pricing
+
     router = harness.router
-    cfg = harness.cfg
-    # Remove google's price; queue errors on openai+anthropic; queue success
-    # on google.
-    cfg.prices.pop("google/gemini-flash", None)
-    harness.vendors["openai"].queue_error(Transient5xx("503"))
-    harness.vendors["openai"].queue_error(Transient5xx("503"))
-    harness.vendors["anthropic"].queue_error(Transient5xx("503"))
-    harness.vendors["anthropic"].queue_error(Transient5xx("503"))
-    harness.vendors["google"].queue_success()
-    harness.vendors["google"].queue_success()
+    result = await router.route(_req(), _caller())
+    assert len(result.attempts) == 1
+    attempt = result.attempts[0]
+    assert attempt.status == "ok"
+    assert attempt.provider == "openai"
+    assert attempt.model == "gpt-4o-mini"
+
+    table = load_pricing()
+    expected_cost = table.cost_usd(
+        provider="openai",
+        model="gpt-4o-mini",
+        input_tokens=attempt.input_tokens,
+        output_tokens=attempt.output_tokens,
+    )
+    assert expected_cost > 0.0
+    assert math.isclose(attempt.cost_usd, expected_cost, rel_tol=1e-9), (
+        f"expected {expected_cost}, got {attempt.cost_usd}"
+    )
+
+
+async def test_cost_is_zero_when_price_missing(redis):
+    """If a candidate's model is not in the PricingTable, cost_usd is 0.0.
+
+    We build a router whose tier uses a made-up model name that is guaranteed
+    not to appear in the vendored JSON. No Config mutation or PricingTable
+    subclassing needed — the model name simply won't match any JSON entry.
+    """
+    from gateway.models import Config
+    from gateway.routing.refresh import build_signals
+
+    state = RedisState(redis)
+    await state.load_scripts()
+
+    # Use a model name that does not exist in the pricing JSON.
+    unknown_model = "no-such-model-xyzzy-9999"
+    cfg = Config.model_validate(
+        {
+            "provider_mode": "mock",
+            "secrets_mode": "mock",
+            "tiers": {
+                "fast": [
+                    {"provider": "google", "model": unknown_model, "weight": 100.0},
+                ],
+            },
+            "routing": {"refresh_interval_ms": 100, "health_window_s": 60,
+                        "target_latency_s": 3.0, "min_weight_floor": 0.001},
+            "prices": {
+                f"google/{unknown_model}": {"input": 0.3, "output": 2.5},
+            },
+            "rate_limits": {
+                f"google/{unknown_model}": {"rpm": 1000, "tpm": 100_000},
+            },
+            "callers": [{"name": "test", "key_hash": "sha256:abc",
+                         "daily_token_cap": 1_000_000}],
+        }
+    )
+
+    sec_mgr = MockSecretsManager()
+    vendors = {"google": MockGoogleVendor(sec_mgr)}
+    obs = Observer(state=state, window_s=60, now_s_fn=lambda: 0.0)
+    bk = BreakerSet(state=state, now_s_fn=lambda: 0.0)
+    rb = RedisTokenBucket(state=state, limits=cfg.rate_limits, now_ms_fn=lambda: 0)
+    engine = WeightEngine(routing=cfg.routing)
+    engine.update_cache(await build_signals(cfg, obs, rb, bk))
+
+    router = Router(
+        config=cfg,
+        vendors=vendors,
+        weight_engine=engine,
+        bucket=rb,
+        observer=obs,
+        rng=random.Random(1),
+        deadline_clock_s=lambda: 0.0,
+    )
     result = await router.route(_req(), _caller())
     winner = result.attempts[-1]
     assert winner.status == "ok"
     assert winner.provider == "google"
+    assert winner.model == unknown_model
     assert winner.cost_usd == 0.0
 
 

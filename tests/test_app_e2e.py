@@ -126,9 +126,9 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
             "secrets_mode": "mock",
             "tiers": {
                 "fast": [
-                    {"provider": "openai", "model": "gpt-mini", "weight": 50.0},
-                    {"provider": "anthropic", "model": "haiku", "weight": 30.0},
-                    {"provider": "google", "model": "flash", "weight": 20.0},
+                    {"provider": "openai", "model": "gpt-4o-mini", "weight": 50.0},
+                    {"provider": "anthropic", "model": "claude-haiku-4-5", "weight": 30.0},
+                    {"provider": "google", "model": "gemini-2.5-flash", "weight": 20.0},
                 ],
             },
             "routing": {
@@ -138,14 +138,14 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
                 "min_weight_floor": 0.001,
             },
             "prices": {
-                "openai/gpt-mini": {"input": 0.15, "output": 0.6},
-                "anthropic/haiku": {"input": 1.0, "output": 5.0},
-                "google/flash": {"input": 0.3, "output": 2.5},
+                "openai/gpt-4o-mini": {"input": 0.15, "output": 0.6},
+                "anthropic/claude-haiku-4-5": {"input": 1.0, "output": 5.0},
+                "google/gemini-2.5-flash": {"input": 0.3, "output": 2.5},
             },
             "rate_limits": {
-                "openai/gpt-mini": {"rpm": 100000, "tpm": 10000000},
-                "anthropic/haiku": {"rpm": 100000, "tpm": 10000000},
-                "google/flash": {"rpm": 100000, "tpm": 10000000},
+                "openai/gpt-4o-mini": {"rpm": 100000, "tpm": 10000000},
+                "anthropic/claude-haiku-4-5": {"rpm": 100000, "tpm": 10000000},
+                "google/gemini-2.5-flash": {"rpm": 100000, "tpm": 10000000},
             },
             "callers": [
                 {

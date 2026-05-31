@@ -39,7 +39,7 @@ def _config() -> Config:
             "tiers": {
                 "fast": [
                     {"provider": "openai", "model": "gpt-4o-mini", "weight": 50.0},
-                    {"provider": "anthropic", "model": "haiku", "weight": 30.0},
+                    {"provider": "anthropic", "model": "claude-haiku-4-5", "weight": 30.0},
                 ],
             },
             "routing": {
@@ -50,11 +50,11 @@ def _config() -> Config:
             },
             "prices": {
                 "openai/gpt-4o-mini": {"input": 0.15, "output": 0.6},
-                "anthropic/haiku": {"input": 1.0, "output": 5.0},
+                "anthropic/claude-haiku-4-5": {"input": 1.0, "output": 5.0},
             },
             "rate_limits": {
                 "openai/gpt-4o-mini": {"rpm": 100, "tpm": 10000},
-                "anthropic/haiku": {"rpm": 60, "tpm": 6000},
+                "anthropic/claude-haiku-4-5": {"rpm": 60, "tpm": 6000},
             },
             "callers": [{"name": "test", "key_hash": "sha256:abc"}],
         }
@@ -103,10 +103,10 @@ async def test_signals_for_healthy_candidate(env):
 
 async def test_signals_reflect_breaker_open(env):
     cfg, obs, rb, bk, clock_obs, clock_bk = env
-    cand = CandidateRef(provider="anthropic", model="haiku")
+    cand = CandidateRef(provider="anthropic", model="claude-haiku-4-5")
     # Trip the breaker
     for _ in range(20):
-        await bk.record_failure("anthropic", "haiku")
+        await bk.record_failure("anthropic", "claude-haiku-4-5")
     clock_bk[0] = 100.0
     await bk.refresh_snapshot()
     sigs = await build_signals(cfg, obs, rb, bk)
@@ -118,7 +118,7 @@ async def test_signals_per_tier_coverage(env):
     sigs = await build_signals(cfg, obs, rb, bk)
     keys = {(c.provider, c.model) for c in sigs}
     assert ("openai", "gpt-4o-mini") in keys
-    assert ("anthropic", "haiku") in keys
+    assert ("anthropic", "claude-haiku-4-5") in keys
 
 
 async def test_signals_feed_weight_engine(env):
@@ -150,7 +150,7 @@ async def test_refresh_task_tick_updates_engine_cache(env):
     # Post-tick: every candidate in every configured tier should be cached.
     for cand in (
         CandidateRef(provider="openai", model="gpt-4o-mini"),
-        CandidateRef(provider="anthropic", model="haiku"),
+        CandidateRef(provider="anthropic", model="claude-haiku-4-5"),
     ):
         s = engine.signals_for(cand)
         assert s is not None
