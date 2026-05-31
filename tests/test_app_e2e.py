@@ -104,6 +104,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
         os.environ["GATEWAY_REDIS_URL"] = redis_url
         os.environ["GATEWAY_PROVIDER_MODE"] = "mock"
         os.environ["GATEWAY_SECRETS_MODE"] = "mock"
+        os.environ["GATEWAY_SEED_CALLERS"] = "1"
 
         from gateway.app import app
 

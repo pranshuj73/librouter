@@ -95,14 +95,17 @@ async def lifespan(app: FastAPI):
     await db.connect()
     await db.run_migrations()
 
-    # Seed callers table from config (dev convenience; in prod use a CLI).
-    for c in cfg.callers:
-        await db.upsert_caller(
-            name=c.name,
-            key_hash=c.key_hash,
-            daily_token_cap=c.daily_token_cap,
-            enabled=c.enabled,
-        )
+    if os.environ.get("GATEWAY_SEED_CALLERS") == "1":
+        for c in cfg.callers:
+            await db.upsert_caller(
+                name=c.name,
+                key_hash=c.key_hash,
+                daily_token_cap=c.daily_token_cap,
+                enabled=c.enabled,
+            )
+        log.info("caller seeding ran: %d caller(s) upserted from config", len(cfg.callers))
+    else:
+        log.info("caller seeding skipped (set GATEWAY_SEED_CALLERS=1 to enable)")
 
     secrets = build_secrets_manager(cfg.secrets_mode)
     vendors = build_vendors(cfg, secrets)
