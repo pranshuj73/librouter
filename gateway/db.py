@@ -43,7 +43,8 @@ class Database:
 
     @property
     def pool(self) -> asyncpg.Pool:
-        assert self._pool is not None, "Database.connect() not called"
+        if self._pool is None:
+            raise RuntimeError("Database.connect() not called")
         return self._pool
 
     # ---------------------------------------------------------------- migrations

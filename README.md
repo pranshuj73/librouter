@@ -16,6 +16,25 @@ curl -sX POST http://localhost:8000/v1/chat/completions \
 
 The default compose runs **mock vendors** so no API keys are needed.
 
+## First-time setup
+
+Before the gateway can serve any traffic, the database needs a schema and at
+least one caller row. These are one-time operations and live in `scripts/`,
+not in the application:
+
+    ./scripts/setup.sh
+
+This runs:
+1. `scripts/apply_migrations.py` — applies every file in `migrations/*.sql`
+2. `scripts/seed_callers.py` — upserts callers from `scripts/data/caller-seeding.json`
+   using plaintext keys from `GATEWAY_SEED_KEY_<NAME>` env vars
+
+For dev, drop the dev key into `.env` (see `.env.example`):
+
+    GATEWAY_SEED_KEY_DEV=dev-key-do-not-use-in-prod
+
+The gateway itself never seeds callers and never runs migrations.
+
 ## Using real providers
 
 Bring up the stack against actual OpenAI / Anthropic / Google APIs.

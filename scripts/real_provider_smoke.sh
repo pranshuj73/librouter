@@ -3,8 +3,9 @@
 #
 # Prereqs:
 #   1. cp .env.example .env  (then fill in OPENAI_API_KEY and/or GOOGLE_API_KEY)
-#   2. docker compose up -d --build
-#   3. wait ~3s for the gateway to come up
+#   2. ./scripts/setup.sh must have been run first (applies migrations and seeds callers)
+#   3. docker compose up -d --build
+#   4. wait ~3s for the gateway to come up
 #
 # Then:
 #   ./scripts/real_provider_smoke.sh

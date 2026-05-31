@@ -104,7 +104,25 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
         os.environ["GATEWAY_REDIS_URL"] = redis_url
         os.environ["GATEWAY_PROVIDER_MODE"] = "mock"
         os.environ["GATEWAY_SECRETS_MODE"] = "mock"
-        os.environ["GATEWAY_SEED_CALLERS"] = "1"
+
+        # Seed DB before booting the app — the app no longer seeds at startup.
+        import asyncio
+        from gateway.db import Database
+
+        async def _setup_db() -> None:
+            boot_db = Database(dsn=pg_dsn)
+            await boot_db.connect()
+            await boot_db.run_migrations()
+            for c in cfg["callers"]:
+                await boot_db.upsert_caller(
+                    name=c["name"],
+                    key_hash=c["key_hash"],
+                    daily_token_cap=c["daily_token_cap"],
+                    enabled=True,
+                )
+            await boot_db.close()
+
+        asyncio.get_event_loop().run_until_complete(_setup_db())
 
         from gateway.app import app
 

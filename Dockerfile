@@ -14,6 +14,7 @@ COPY ./requirements.txt /code/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ./gateway /code/gateway
+COPY ./migrations /code/migrations
 COPY ./config.yaml /code/config.yaml
 COPY ./config.dev.yaml /code/config.dev.yaml
 

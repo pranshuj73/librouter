@@ -21,7 +21,7 @@ import redis.asyncio as redis_async
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 
 from gateway.accounting import AccountingQueue
-from gateway.auth import CallerResolver, hash_api_key
+from gateway.auth import CallerResolver
 from gateway.breaker import BreakerSet, BreakerState
 from gateway.config import ConfigHolder, install_sighup_reload, load_config
 from gateway.db import Database
@@ -93,19 +93,15 @@ async def lifespan(app: FastAPI):
 
     db = Database(dsn=db_dsn)
     await db.connect()
-    await db.run_migrations()
 
-    if os.environ.get("GATEWAY_SEED_CALLERS") == "1":
-        for c in cfg.callers:
-            await db.upsert_caller(
-                name=c.name,
-                key_hash=c.key_hash,
-                daily_token_cap=c.daily_token_cap,
-                enabled=c.enabled,
+    try:
+        count = await db.pool.fetchval("SELECT COUNT(*) FROM callers")
+        if count == 0:
+            log.warning(
+                "callers table is empty — run ./scripts/setup.sh to seed callers"
             )
-        log.info("caller seeding ran: %d caller(s) upserted from config", len(cfg.callers))
-    else:
-        log.info("caller seeding skipped (set GATEWAY_SEED_CALLERS=1 to enable)")
+    except Exception as exc:
+        log.warning("could not check callers table at boot: %s", exc)
 
     secrets = build_secrets_manager(cfg.secrets_mode)
     vendors = build_vendors(cfg, secrets)
