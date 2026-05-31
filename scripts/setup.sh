@@ -20,13 +20,23 @@ if [ -f ./.env ]; then
   set +a
 fi
 
+# Prefer the project venv so the system Python (which may lack asyncpg etc.)
+# isn't used by accident. Override with PYTHON=... if needed.
+if [ -z "${PYTHON:-}" ]; then
+  if [ -x ./.venv/bin/python ]; then
+    PYTHON=./.venv/bin/python
+  else
+    PYTHON=python
+  fi
+fi
+
 echo "applying migrations..."
-python -m scripts.apply_migrations
+"$PYTHON" -m scripts.apply_migrations
 
 echo "seeding gateway config..."
-python -m scripts.seed_config
+"$PYTHON" -m scripts.seed_config
 
 echo "seeding callers..."
-python -m scripts.seed_callers
+"$PYTHON" -m scripts.seed_callers
 
 echo "setup complete"
