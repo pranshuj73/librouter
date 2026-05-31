@@ -115,6 +115,22 @@ async def lifespan(app: FastAPI):
     if not db_dsn:
         db_dsn = "postgres://gateway:gateway@localhost:5432/gateway"
 
+    # #5.4: In real mode, both transports should be TLS. We log a warning
+    # rather than fail so a deployment behind a TLS-terminating proxy on the
+    # same host can opt out, but anything fronting the public internet should
+    # use sslmode=require / rediss://.
+    if cfg.provider_mode == "real":
+        if "sslmode=require" not in db_dsn and "sslmode=verify" not in db_dsn:
+            log.warning(
+                "postgres DSN does not require TLS in real mode; "
+                "add ?sslmode=require to GATEWAY_DB_DSN"
+            )
+        if not redis_url.startswith("rediss://"):
+            log.warning(
+                "redis URL is not rediss:// in real mode; "
+                "set GATEWAY_REDIS_URL to a rediss:// endpoint"
+            )
+
     r = redis_async.from_url(redis_url, decode_responses=False)
     state = RedisState(r)
     await state.load_scripts()
