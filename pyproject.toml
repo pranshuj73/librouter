@@ -1,7 +1,40 @@
 [project]
 name = "or"
 version = "0.1.0"
-description = "Add your description here"
+description = "Internal LLM gateway with weighted autorouting"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.32.1",
+    "httpx==0.28.1",
+    "pydantic==2.10.4",
+    "asyncpg==0.30.0",
+    "redis[hiredis]==5.2.1",
+    "structlog==24.4.0",
+    "prometheus-client==0.21.1",
+    "pyyaml==6.0.2",
+    "openai==1.58.1",
+    "anthropic==0.42.0",
+    "google-genai==0.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.0",
+    "respx==0.21.1",
+    "freezegun==1.5.1",
+    "testcontainers[redis,postgres]==4.9.0",
+    "fakeredis==2.26.2",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.setuptools.packages.find]
+include = ["gateway*"]

@@ -8,3 +8,17 @@ wheels/
 
 # Virtual environments
 .venv
+venv/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors
+.idea/
+.vscode/
+
+# Local env
+.env
+*.local
