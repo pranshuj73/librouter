@@ -107,29 +107,20 @@ async def test_unknown_provider_model_raises(bucket):
 # drives both TPM acquisition and routing weight. Per t-1 §7 Missing scenarios.
 
 
-def test_estimate_tokens_empty_prompt_floor():
-    # No prompt, no max_tokens => floor of 1.
-    assert estimate_tokens(0, 0) == 1
-
-
-def test_estimate_tokens_floor_when_only_one_char():
-    # 1 char // 4 == 0, plus max_tokens=0 => still hits the max(1, ...) floor.
-    assert estimate_tokens(1, 0) == 1
-
-
-def test_estimate_tokens_only_response_budget():
-    # 0 prompt chars; only the response budget contributes.
-    assert estimate_tokens(0, 100) == 100
-
-
-def test_estimate_tokens_typical_prompt():
-    # 400 chars // 4 == 100; plus max_tokens=100 => 200.
-    assert estimate_tokens(400, 100) == 200
-
-
-def test_estimate_tokens_large_prompt():
-    # 40_000 // 4 == 10_000; plus 1_000 max_tokens => 11_000.
-    assert estimate_tokens(40_000, 1_000) == 11_000
+@pytest.mark.parametrize(
+    "prompt_chars,max_tokens,expected",
+    [
+        (0, 0, 1),           # floor: max(1, ...)
+        (1, 0, 1),           # 1 // 4 == 0; still hits floor
+        (0, 100, 100),       # only response budget
+        (400, 100, 200),     # 400 // 4 == 100; + 100
+        (40_000, 1_000, 11_000),
+    ],
+)
+async def test_estimate_tokens(prompt_chars, max_tokens, expected):
+    # async def to compose with module-level pytest.mark.asyncio; the function
+    # is pure and never awaits.
+    assert estimate_tokens(prompt_chars, max_tokens) == expected
 
 
 # ---------------------------------------------------------------- contract / isolation
