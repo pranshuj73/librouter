@@ -2,6 +2,9 @@
 
 Wraps `openai.AsyncOpenAI`. Translates SDK errors to the `ProviderError`
 taxonomy in `gateway.errors` and returns a normalized `ChatResult`.
+
+Security note (#4.2): raw SDK exception strings are stored in
+``vendor_detail`` for operator logs only — never forwarded to callers.
 """
 
 from __future__ import annotations
@@ -63,25 +66,25 @@ class OpenAIVendor(Vendor):
                 timeout=timeout_s + 0.5,
             )
         except asyncio.TimeoutError as e:
-            raise Timeout(str(e)) from e
+            raise Timeout(type(e).__name__, vendor_detail=str(e)) from e
         except APITimeoutError as e:
-            raise Timeout(str(e)) from e
+            raise Timeout(type(e).__name__, vendor_detail=str(e)) from e
         except RateLimitError as e:
-            raise RateLimited(str(e)) from e
+            raise RateLimited(type(e).__name__, vendor_detail=str(e)) from e
         except AuthenticationError as e:
-            raise AuthError(str(e)) from e
+            raise AuthError(type(e).__name__, vendor_detail=str(e)) from e
         except BadRequestError as e:
-            raise BadRequest(str(e)) from e
+            raise BadRequest(type(e).__name__, vendor_detail=str(e)) from e
         except InternalServerError as e:
-            raise Transient5xx(str(e)) from e
+            raise Transient5xx(type(e).__name__, vendor_detail=str(e)) from e
         except APIConnectionError as e:
-            raise Transient5xx(str(e)) from e
+            raise Transient5xx(type(e).__name__, vendor_detail=str(e)) from e
         except APIStatusError as e:
             if 500 <= e.status_code < 600:
-                raise Transient5xx(str(e)) from e
+                raise Transient5xx(type(e).__name__, vendor_detail=str(e)) from e
             if e.status_code == 429:
-                raise RateLimited(str(e)) from e
-            raise BadRequest(str(e)) from e
+                raise RateLimited(type(e).__name__, vendor_detail=str(e)) from e
+            raise BadRequest(type(e).__name__, vendor_detail=str(e)) from e
 
         choice = resp.choices[0]
         finish = choice.finish_reason

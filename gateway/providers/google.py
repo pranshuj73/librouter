@@ -3,6 +3,9 @@
 The `google-genai` SDK is structured differently from OpenAI/Anthropic: an
 explicit `Client` is constructed, and the `aio` namespace exposes async
 methods. Generation parameters live in a `GenerateContentConfig`.
+
+Security note (#4.2): raw SDK exception strings are stored in
+``vendor_detail`` for operator logs only — never forwarded to callers.
 """
 
 from __future__ import annotations
@@ -72,7 +75,7 @@ class GoogleVendor(Vendor):
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError as e:
-            raise Timeout(str(e)) from e
+            raise Timeout(type(e).__name__, vendor_detail=str(e)) from e
         except genai.errors.APIError as e:
             # google-genai surfaces an APIError with `.code` HTTP status
             status = getattr(e, "code", None) or getattr(e, "status_code", None) or 0
@@ -81,14 +84,14 @@ class GoogleVendor(Vendor):
             except (TypeError, ValueError):
                 status = 0
             if status == 429:
-                raise RateLimited(str(e)) from e
+                raise RateLimited(type(e).__name__, vendor_detail=str(e)) from e
             if status in (401, 403):
-                raise AuthError(str(e)) from e
+                raise AuthError(type(e).__name__, vendor_detail=str(e)) from e
             if status >= 500:
-                raise Transient5xx(str(e)) from e
-            raise BadRequest(str(e)) from e
+                raise Transient5xx(type(e).__name__, vendor_detail=str(e)) from e
+            raise BadRequest(type(e).__name__, vendor_detail=str(e)) from e
         except Exception as e:  # pragma: no cover - defensive
-            raise Transient5xx(str(e)) from e
+            raise Transient5xx(type(e).__name__, vendor_detail=str(e)) from e
 
         # Extract text + usage.
         text = getattr(resp, "text", None)
