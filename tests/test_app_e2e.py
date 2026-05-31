@@ -472,10 +472,18 @@ def test_readyz(stack):
     r = client.get("/readyz")
     assert r.status_code == 200
     body = r.json()
-    assert "status" in body
-    assert "tiers" in body
-    assert isinstance(body["tiers"], list)
-    assert len(body["tiers"]) >= 1
+    assert body == {"status": "ready"}
+
+
+def test_readyz_does_not_leak_tier_names(stack):
+    """#8.3 — `/readyz` is unauthenticated; it must not disclose configured
+    tier names or any other configuration shape."""
+    client, _ = stack
+    r = client.get("/readyz")
+    body = r.json()
+    assert "tiers" not in body
+    assert "providers" not in body
+    assert "callers" not in body
 
 
 def test_metrics_requires_auth(stack):

@@ -261,8 +261,9 @@ async def healthz() -> dict[str, Any]:
 
 @app.get("/readyz")
 async def readyz(request: Request) -> dict[str, Any]:
-    # Light readiness check — engine cache populated and DB pool open.
-    return {"status": "ready", "tiers": list(request.app.state.cfg.value.tiers.keys())}
+    # #8.3 — Unauthenticated. Return only a status flag; do not disclose
+    # tier names, provider names, or any other configuration shape.
+    return {"status": "ready"}
 
 
 @app.get("/metrics")
