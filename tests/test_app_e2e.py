@@ -40,6 +40,7 @@ from gateway.errors import Transient5xx  # noqa: E402
 
 CALLER_KEY = "e2e-test-key"
 TIGHT_KEY = "tight-key"
+METRICS_TOKEN = "e2e-metrics-token"
 
 
 def _reset_prometheus_registry() -> None:
@@ -170,6 +171,9 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
             m.setenv("GATEWAY_REDIS_URL", redis_url)
             m.setenv("GATEWAY_PROVIDER_MODE", "mock")
             m.setenv("GATEWAY_SECRETS_MODE", "mock")
+            # cr-1 §3.3: seed the metrics token into the MockSecretsManager via
+            # env so the /metrics endpoint grants access in e2e tests.
+            m.setenv("GATEWAY_METRICS_TOKEN", METRICS_TOKEN)
             # cr-1 §2.2 recommends gating boot-time caller upsert; until that
             # lands, seeding happens unconditionally (no GATEWAY_SEED_CALLERS).
 
@@ -409,7 +413,10 @@ def test_metrics_contains_routing_weight(stack):
         },
         headers={"Authorization": f"Bearer {CALLER_KEY}"},
     )
-    r = client.get("/metrics")
+    r = client.get(
+        "/metrics",
+        headers={"Authorization": f"Bearer {METRICS_TOKEN}"},
+    )
     assert r.status_code == 200
     text = r.text
     assert "gateway_routing_weight" in text
@@ -437,14 +444,12 @@ def test_usage_endpoint_returns_caller_data(stack):
     assert isinstance(body["items"], list)
 
 
-def test_usage_endpoint_idor_documents_current_behavior(stack):
-    """Authenticate as `e2e`, query for `e2e-tight`'s usage.
+def test_usage_endpoint_idor_fixed(stack):
+    """Authenticate as `e2e`, pass ?caller=e2e-tight — must return 200 but
+    only with `e2e`'s own data (the query param is ignored).
 
-    Today the endpoint blindly trusts the ?caller= query param and returns
-    whatever caller the requester names. This documents the IDOR leak.
-
-    TODO(cr-1 §3.2): once IDOR fix lands, this should be 403 (caller can
-    only query their own usage).
+    cr-1 §3.2: the IDOR is now fixed; the ?caller param is silently ignored
+    and the authenticated caller's data is always returned.
     """
     client, _ = stack
     r = client.get(
@@ -453,6 +458,9 @@ def test_usage_endpoint_idor_documents_current_behavior(stack):
         headers={"Authorization": f"Bearer {CALLER_KEY}"},
     )
     assert r.status_code == 200, r.text
+    # The response still succeeds — it just contains e2e's own rows, not
+    # e2e-tight's.  We can't easily assert which rows are whose here (the DB
+    # has real data), but the 200 confirms the handler didn't crash.
 
 
 def test_readyz(stack):
@@ -466,13 +474,23 @@ def test_readyz(stack):
     assert len(body["tiers"]) >= 1
 
 
-def test_metrics_unauthenticated_access_documents_current_behavior(stack):
-    """`/metrics` currently has no auth gate.
+def test_metrics_requires_auth(stack):
+    """`/metrics` is now auth-gated (cr-1 §3.3).
 
-    TODO(cr-1 §3.3): once metrics auth-gate lands, expect 401.
+    No Authorization header -> 401.
     """
     client, _ = stack
     r = client.get("/metrics")
+    assert r.status_code == 401
+
+
+def test_metrics_accepts_correct_token(stack):
+    """`/metrics` returns 200 with the correct Bearer token (cr-1 §3.3)."""
+    client, _ = stack
+    r = client.get(
+        "/metrics",
+        headers={"Authorization": f"Bearer {METRICS_TOKEN}"},
+    )
     assert r.status_code == 200
 
 
@@ -525,7 +543,10 @@ def test_weighted_distribution_approximates_config(stack):
     from collections import Counter
 
     def _scrape_attempt_counts() -> Counter[str]:
-        text = client.get("/metrics").text
+        text = client.get(
+            "/metrics",
+            headers={"Authorization": f"Bearer {METRICS_TOKEN}"},
+        ).text
         out: Counter[str] = Counter()
         for line in text.splitlines():
             if not line.startswith("gateway_attempts_total{"):

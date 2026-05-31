@@ -284,3 +284,32 @@ async def test_caller_name_safely_parameterized(db: Database):
         )
     assert row is not None
     assert row["name"] == evil
+
+
+# ---------------------------------------------------------------- Finding 3.5 — client_trace_id persistence
+
+
+async def test_write_batch_persists_client_trace_id(db: Database):
+    """write_batch stores client_trace_id into the requests table."""
+    rec = AttemptRecord(
+        request_id="req-trace-1",
+        caller="svc-a",
+        tier="fast",
+        provider="openai",
+        model="gpt-4o-mini",
+        attempt_idx=0,
+        input_tokens=10,
+        output_tokens=20,
+        cost_usd=0.001,
+        latency_ms=200,
+        status="ok",
+        vendor_req_id="vrid-trace-1",
+        client_trace_id="trace-1",
+    )
+    await db.write_batch([rec])
+    async with db.pool.acquire() as c:
+        row = await c.fetchrow(
+            "SELECT client_trace_id FROM requests WHERE request_id = 'req-trace-1'"
+        )
+    assert row is not None
+    assert row["client_trace_id"] == "trace-1"

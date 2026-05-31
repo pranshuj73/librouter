@@ -153,7 +153,16 @@ async def test_writer_exception_increments_dropped_total():
     """When the writer raises, the in-flight batch counts toward dropped_total.
 
     Covers the `except Exception` branch in AccountingQueue._flush.
+    Also verifies that ACCOUNTING_DROPPED (the live Prometheus counter) is
+    incremented immediately — not only at shutdown — so operators see drops
+    in real-time.  (#6.3)
     """
+    from gateway.metrics import ACCOUNTING_DROPPED
+
+    # Snapshot the Prometheus counter value before the test.
+    # _value is a prometheus_client ValueClass; .get() returns the float.
+    before = ACCOUNTING_DROPPED._value.get()
+
     writer = _RaisingWriter()
     q = AccountingQueue(
         writer=writer, capacity=100, flush_size=3, flush_interval_ms=10_000
@@ -165,7 +174,15 @@ async def test_writer_exception_increments_dropped_total():
         await asyncio.wait_for(writer.attempted.wait(), timeout=1.0)
     finally:
         await q.stop()
+
     assert q.dropped_total >= 3
+
+    # The Prometheus counter must have advanced by at least the number of
+    # records in the failed batch — live, without waiting for shutdown.
+    after = ACCOUNTING_DROPPED._value.get()
+    assert after - before >= 3, (
+        f"ACCOUNTING_DROPPED did not advance live: before={before}, after={after}"
+    )
 
 
 async def test_stop_before_start_is_safe():

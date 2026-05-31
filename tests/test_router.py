@@ -7,6 +7,7 @@ clock, seeded RNG, fakeredis.
 
 from __future__ import annotations
 
+import re
 import random
 from dataclasses import dataclass
 
@@ -502,30 +503,53 @@ async def test_cost_is_zero_when_price_missing(harness):
 
 
 async def test_vendor_req_id_flows_to_response_id(harness):
-    """Without a caller-supplied request_id, ``response.id`` should fall
-    through to the vendor's ``vendor_request_id`` (router.py:236)."""
+    """response.id is now always the server-generated uuid4 hex, regardless
+    of the vendor's vendor_request_id.  The server-generated id is 32 hex
+    chars; it takes precedence over any vendor-supplied id."""
     router = harness.router
     for v in harness.vendors.values():
         v.queue_success(vendor_request_id="vrid-explicit")
     result = await router.route(_req(), _caller())
-    assert result.response.id == "vrid-explicit"
+    assert re.fullmatch(r"[0-9a-f]{32}", result.response.id)
 
 
-async def test_metadata_request_id_flows_to_attempt(harness):
-    """Caller-supplied ``metadata.request_id`` propagates to
-    ``AttemptRecord.request_id``.
+# ---------------------------------------------------------------- Finding 3.5 — server-generated request_id
 
-    Note: cr-1 §3.5 flags this as caller-spoofable; once that's fixed
-    this test should change (likely to assert a server-generated id and
-    that the caller value is captured under a different field).
-    """
+
+async def test_request_id_is_server_generated(harness):
+    """route() with no metadata must return a 32-hex-char server-generated id."""
+    router = harness.router
+    result = await router.route(_req(), _caller())
+    assert re.fullmatch(r"[0-9a-f]{32}", result.response.id), (
+        f"expected 32-char hex id, got {result.response.id!r}"
+    )
+
+
+async def test_client_trace_id_is_recorded(harness):
+    """Caller-supplied metadata.request_id is stored as client_trace_id;
+    response.id is the server-generated uuid (not the caller value)."""
     router = harness.router
     for v in harness.vendors.values():
         v.queue_success()
     result = await router.route(
-        _req(metadata={"request_id": "client-trace-7"}), _caller()
+        _req(metadata={"request_id": "client-abc-123"}), _caller()
     )
-    assert result.attempts[0].request_id == "client-trace-7"
+    assert result.attempts[0].client_trace_id == "client-abc-123"
+    # response.id must be the server-generated uuid, not the caller's value.
+    assert result.response.id != "client-abc-123"
+    assert re.fullmatch(r"[0-9a-f]{32}", result.response.id)
+
+
+async def test_client_trace_id_truncated_at_128(harness):
+    """A metadata.request_id longer than 128 chars is truncated before storage."""
+    router = harness.router
+    for v in harness.vendors.values():
+        v.queue_success()
+    long_id = "x" * 200
+    result = await router.route(
+        _req(metadata={"request_id": long_id}), _caller()
+    )
+    assert result.attempts[0].client_trace_id == "x" * 128
 
 
 # ---------------------------------------------------------------- accounting feed

@@ -223,3 +223,18 @@ async def test_threshold_boundary_at_exactly_minimum_samples(breakers):
         await b.record_failure("openai", "gpt-4o")
     await b.refresh_snapshot()
     assert await b.state("openai", "gpt-4o") is BreakerState.OPEN
+
+
+async def test_refresh_snapshot_swaps_to_new_dict(breakers):
+    """refresh_snapshot rebuilds a fresh dict and atomically swaps _snapshot.
+
+    After a call to refresh_snapshot the resulting _snapshot object must be a
+    *different* dict instance than the one that was there before the call.
+    (#6.1 — atomic-swap prevents torn reads from concurrent async paths.)
+    """
+    b, _ = breakers
+    await b.record_success("openai", "gpt-4o")
+    initial_snapshot_ref = b._snapshot  # capture identity before refresh
+    await b.refresh_snapshot()
+    # The swap must have replaced the dict — different object identity.
+    assert b._snapshot is not initial_snapshot_ref

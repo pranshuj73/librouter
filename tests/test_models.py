@@ -474,6 +474,48 @@ def test_caller_name_regex_applies_to_attempt_record():
     assert rec.caller == "svc-a"
 
 
+# ---------------------------------------------------------------- Finding 3.5 — client_trace_id
+
+
+def test_attempt_record_client_trace_id_optional():
+    """client_trace_id defaults to None and accepts a string value."""
+    base = dict(
+        request_id="req-1",
+        caller="svc-a",
+        tier="fast",
+        provider="openai",
+        model="gpt-4o-mini",
+        attempt_idx=0,
+        latency_ms=100,
+        status="ok",
+    )
+    rec_no_trace = AttemptRecord(**base)
+    assert rec_no_trace.client_trace_id is None
+
+    rec_with_trace = AttemptRecord(**base, client_trace_id="abc")
+    assert rec_with_trace.client_trace_id == "abc"
+
+
+def test_attempt_record_client_trace_id_rejects_too_long():
+    """client_trace_id longer than 128 chars must raise ValidationError."""
+    base = dict(
+        request_id="req-1",
+        caller="svc-a",
+        tier="fast",
+        provider="openai",
+        model="gpt-4o-mini",
+        attempt_idx=0,
+        latency_ms=100,
+        status="ok",
+    )
+    with pytest.raises(ValidationError):
+        AttemptRecord(**base, client_trace_id="x" * 129)
+
+    # Exactly 128 chars must be accepted.
+    rec = AttemptRecord(**base, client_trace_id="x" * 128)
+    assert len(rec.client_trace_id) == 128
+
+
 # ---------------------------------------------------------------- Finding 6 — gap-closing scenarios
 #
 # The cases below close the §6 gaps in `docs/code-review/t-1.md`. Most
