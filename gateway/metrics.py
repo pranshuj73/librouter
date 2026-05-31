@@ -76,6 +76,12 @@ REDIS_DOWN = Gauge(
     registry=REGISTRY,
 )
 
+REFRESH_ERRORS_TOTAL = Counter(
+    "gateway_refresh_errors_total",
+    "Number of weight-refresh ticks that raised an exception.",
+    registry=REGISTRY,
+)
+
 
 def render_metrics() -> tuple[bytes, str]:
     return generate_latest(REGISTRY), CONTENT_TYPE_LATEST

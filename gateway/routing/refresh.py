@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Iterable
 
 from gateway.breaker import BreakerSet, BreakerState
+from gateway.metrics import REFRESH_ERRORS_TOTAL
 from gateway.models import CandidateRef, Config
 from gateway.ratelimit import RedisTokenBucket
 from gateway.routing.observe import Observer
@@ -111,14 +113,30 @@ class RefreshTask:
         self._engine.update_cache(signals)
 
     async def _loop(self) -> None:
-        interval_s = self._cfg.routing.refresh_interval_ms / 1000.0
+        # #6.2: jittered exponential backoff on consecutive failures so a
+        # Redis outage doesn't produce many log lines and metric increments
+        # per second. The base interval is restored after the first success.
+        base_interval_s = self._cfg.routing.refresh_interval_ms / 1000.0
+        max_backoff_s = 30.0
+        consecutive_failures = 0
         while not self._stop.is_set():
             try:
                 await self.tick()
+                consecutive_failures = 0
+                next_wait_s = base_interval_s
             except Exception:
-                log.exception("refresh tick failed")
+                consecutive_failures += 1
+                REFRESH_ERRORS_TOTAL.inc()
+                if consecutive_failures == 1:
+                    log.exception("refresh tick failed")
+                backoff = min(
+                    max_backoff_s,
+                    base_interval_s * (2 ** (consecutive_failures - 1)),
+                )
+                # 50–100% of nominal backoff so concurrent replicas don't sync.
+                next_wait_s = backoff * (0.5 + random.random() * 0.5)
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=interval_s)
+                await asyncio.wait_for(self._stop.wait(), timeout=next_wait_s)
             except asyncio.TimeoutError:
                 pass
 

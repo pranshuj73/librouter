@@ -265,3 +265,162 @@ async def test_build_signals_dedups_same_candidate_in_multiple_tiers(env):
     assert list(sigs.keys()) == [cand]
     # First-seen base_weight (`fast`'s 50.0) wins over `smart`'s 99.0.
     assert sigs[cand].base_weight == 50.0
+
+
+# ---------------------------------------------------------------- #6.2 backoff
+
+
+async def test_refresh_failures_increment_metric_counter(env, monkeypatch):
+    """Each failed tick increments the `gateway_refresh_errors_total` counter."""
+    cfg, obs, rb, bk, _, _ = env
+    engine = WeightEngine(routing=cfg.routing)
+
+    import gateway.routing.refresh as refresh_mod
+    from gateway.metrics import REFRESH_ERRORS_TOTAL
+
+    async def always_fail(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(refresh_mod, "build_signals", always_fail)
+
+    task = RefreshTask(
+        config=cfg.model_copy(
+            update={"routing": cfg.routing.model_copy(update={"refresh_interval_ms": 5})}
+        ),
+        observer=obs,
+        bucket=rb,
+        breakers=bk,
+        engine=engine,
+    )
+
+    start = REFRESH_ERRORS_TOTAL._value.get()
+    # Manual tick: must raise; counter must be 1 above start.
+    with pytest.raises(RuntimeError):
+        await task.tick()
+    # The counter is incremented by the *loop's* exception-handling path, not
+    # by `tick()` itself, so we drive a few iterations via the loop.
+    task.start()
+    await asyncio.sleep(0.05)
+    await task.stop()
+    end = REFRESH_ERRORS_TOTAL._value.get()
+    assert end - start >= 2, (
+        f"expected at least 2 increments from loop ticks, got {end - start}"
+    )
+
+
+async def test_refresh_backs_off_under_consecutive_failures(env, monkeypatch):
+    """Consecutive failures should slow the tick rate down — not stay at the
+    base interval. Concretely: after the loop runs for some wall-clock time,
+    a constantly-failing tick must produce fewer attempts than `time / base`.
+    """
+    cfg, obs, rb, bk, _, _ = env
+    engine = WeightEngine(routing=cfg.routing)
+
+    import gateway.routing.refresh as refresh_mod
+
+    call_count = {"n": 0}
+
+    async def always_fail(*_args, **_kwargs):
+        call_count["n"] += 1
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(refresh_mod, "build_signals", always_fail)
+
+    fast_cfg = cfg.model_copy(
+        update={"routing": cfg.routing.model_copy(update={"refresh_interval_ms": 10})}
+    )
+    task = RefreshTask(
+        config=fast_cfg, observer=obs, bucket=rb, breakers=bk, engine=engine
+    )
+    task.start()
+    await asyncio.sleep(0.4)
+    await task.stop()
+
+    # Base interval 10ms × 0.4s = 40 ticks at no backoff. With exponential
+    # backoff doubling on each failure (jittered), we should see well under
+    # half that count. Pick an aggressive ceiling so a regression that
+    # removes the backoff would fail this test loudly.
+    assert call_count["n"] < 20, (
+        f"expected backoff to slow ticks below 20 in 400ms, got {call_count['n']}"
+    )
+    # And at least 2 — we *should* still retry, just less aggressively.
+    assert call_count["n"] >= 2
+
+
+async def test_refresh_resets_backoff_after_success(env, monkeypatch):
+    """Once a tick succeeds, the loop should return to the base interval —
+    the next consecutive failure must not inherit the previous backoff."""
+    cfg, obs, rb, bk, _, _ = env
+    engine = WeightEngine(routing=cfg.routing)
+
+    import gateway.routing.refresh as refresh_mod
+
+    real = refresh_mod.build_signals
+    call_count = {"n": 0}
+
+    async def flaky(*args, **kwargs):
+        call_count["n"] += 1
+        # Fail x3, succeed once, then fail again — sequence ends with a
+        # failure that should NOT inherit the earlier-backed-off delay.
+        if call_count["n"] in (1, 2, 3):
+            raise RuntimeError("boom")
+        if call_count["n"] == 4:
+            return await real(*args, **kwargs)
+        raise RuntimeError("boom-again")
+
+    monkeypatch.setattr(refresh_mod, "build_signals", flaky)
+
+    fast_cfg = cfg.model_copy(
+        update={"routing": cfg.routing.model_copy(update={"refresh_interval_ms": 20})}
+    )
+    task = RefreshTask(
+        config=fast_cfg, observer=obs, bucket=rb, breakers=bk, engine=engine
+    )
+    task.start()
+    # Long enough to: 3 fails (~20+40+80ms wait windows worst case), 1 success
+    # (resets), and a 5th failure (~20ms wait).
+    await asyncio.sleep(0.6)
+    await task.stop()
+
+    # After reset, a 5th call should have happened within the post-success
+    # base-interval window. If reset didn't work, we'd still be in 80+ms
+    # backoff and probably not have hit n=5 yet.
+    assert call_count["n"] >= 5, (
+        f"expected reset-on-success to allow ≥5 ticks in 600ms, got {call_count['n']}"
+    )
+
+
+async def test_refresh_only_logs_first_failure_in_a_burst(env, monkeypatch, caplog):
+    """Burst of failures shouldn't spam the log. The first failure should be
+    logged at ERROR; subsequent failures in the same burst should not."""
+    cfg, obs, rb, bk, _, _ = env
+    engine = WeightEngine(routing=cfg.routing)
+
+    import gateway.routing.refresh as refresh_mod
+    import logging as stdlib_logging
+
+    async def always_fail(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(refresh_mod, "build_signals", always_fail)
+
+    fast_cfg = cfg.model_copy(
+        update={"routing": cfg.routing.model_copy(update={"refresh_interval_ms": 5})}
+    )
+    task = RefreshTask(
+        config=fast_cfg, observer=obs, bucket=rb, breakers=bk, engine=engine
+    )
+
+    with caplog.at_level(stdlib_logging.ERROR, logger="gateway.routing.refresh"):
+        task.start()
+        await asyncio.sleep(0.2)
+        await task.stop()
+
+    # Burst of ~3+ failures should produce at most one ERROR record.
+    error_records = [
+        r for r in caplog.records
+        if r.name == "gateway.routing.refresh" and r.levelno >= stdlib_logging.ERROR
+    ]
+    assert len(error_records) <= 1, (
+        f"expected ≤1 ERROR log in failure burst, got {len(error_records)}"
+    )
