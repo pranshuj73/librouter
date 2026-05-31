@@ -50,9 +50,29 @@ class Database:
     # ---------------------------------------------------------------- migrations
 
     async def run_migrations(self) -> None:
+        # Fail fast before touching the pool so we don't hold a connection
+        # slot while raising a configuration error.
+        if not _MIGRATIONS_DIR.exists():
+            raise RuntimeError(
+                f"migrations directory not found: {_MIGRATIONS_DIR}. "
+                "Ensure the 'migrations/' directory is present in the Docker image."
+            )
         files = sorted(_MIGRATIONS_DIR.glob("*.sql"))
+        if not files:
+            raise RuntimeError(
+                f"migrations directory is empty (no *.sql files): {_MIGRATIONS_DIR}. "
+                "At least one migration file is required."
+            )
+
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # Serialize concurrent migration runs across replicas with a
+                # Postgres transactional advisory lock.  The lock is released
+                # automatically when the transaction commits or rolls back.
+                # Lock ID 7331101 is an arbitrary project-specific constant
+                # chosen to avoid collisions with other advisory locks in the
+                # same cluster.
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", 7331101)
                 for f in files:
                     sql = f.read_text()
                     await conn.execute(sql)
