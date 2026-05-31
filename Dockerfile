@@ -18,6 +18,10 @@ COPY ./migrations /code/migrations
 COPY ./config.yaml /code/config.yaml
 COPY ./config.dev.yaml /code/config.dev.yaml
 
+RUN useradd --system --uid 10001 --no-create-home gateway \
+ && chown -R gateway:gateway /code
+USER gateway
+
 EXPOSE 8000
 
 CMD ["uvicorn", "gateway.app:app", "--host", "0.0.0.0", "--port", "8000"]
